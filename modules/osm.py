@@ -1,39 +1,51 @@
-"""
-Módulo para integração com OpenStreetMap.
-"""
+import requests
+from shapely.geometry import Polygon
 
-def obter_poligonos_osm(lat: float, lon: float, raio: float) -> list:
+OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+
+
+def query_overpass(lat: float, lon: float, radius: float, landuses: list[str]):
     """
-    Consulta OpenStreetMap para obter polígonos de uso do solo.
-    
-    Args:
-        lat: Latitude central
-        lon: Longitude central
-        raio: Raio de busca em metros
-        
-    Returns:
-        list: Lista de polígonos com metadata
+    Consulta a Overpass API e retorna JSON bruto
     """
-    # TODO: Implementar consulta real à Overpass API
-    print(f"[DEBUG] Consultando OSM para área de {raio}m de raio")
-    
-    # Mock: retorna polígonos falsos
-    import random
-    
-    tipos = ["residencial", "industrial", "comercial", "misto"]
-    num_poligonos = random.randint(3, 8)
-    
-    poligonos = []
-    for i in range(num_poligonos):
-        poligonos.append({
-            "id": f"poly_{i}",
-            "tipo": random.choice(tipos),
-            "area_m2": random.randint(500, 5000),
-            "vertices": [
-                [lat + random.uniform(-0.001, 0.001), 
-                 lon + random.uniform(-0.001, 0.001)]
-                for _ in range(4)
-            ]
+    landuse_str = "|".join(landuses)
+
+    query = f"""
+    [out:json][timeout:60];
+    (
+      way["landuse"~"{landuse_str}"](around:{radius},{lat},{lon});
+      relation["landuse"~"{landuse_str}"](around:{radius},{lat},{lon});
+    );
+    out geom;
+    """
+
+    response = requests.post(OVERPASS_URL, data=query, timeout=60)
+    response.raise_for_status()
+    return response.json()
+
+
+def parse_osm_polygons(overpass_json: dict):
+    """
+    Converte resposta Overpass em polígonos shapely normalizados
+    """
+    polygons = []
+
+    for element in overpass_json.get("elements", []):
+        tags = element.get("tags", {})
+        landuse = tags.get("landuse")
+
+        if not landuse or "geometry" not in element:
+            continue
+
+        coords = [(p["lon"], p["lat"]) for p in element["geometry"]]
+
+        if len(coords) < 3:
+            continue  # não é polígono válido
+
+        polygons.append({
+            "osm_id": f"{element['type']}/{element['id']}",
+            "landuse": landuse,
+            "geometry": Polygon(coords)
         })
-    
-    return poligonos
+
+    return polygons
