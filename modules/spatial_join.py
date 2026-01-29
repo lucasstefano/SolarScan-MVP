@@ -1,31 +1,39 @@
-"""
-Módulo para operações de Spatial Join.
-"""
+from shapely.geometry import Point
 
-def fazer_spatial_join(deteccoes: list, poligonos: list) -> dict:
+
+def spatial_join_panels_with_landuse(detections: list[dict], polygons: list[dict]):
     """
-    Associa cada detecção a um polígono de uso do solo.
-    
-    Args:
-        deteccoes: Lista de detecções de painéis
-        poligonos: Lista de polígonos de uso do solo
-        
-    Returns:
-        dict: Contagem de painéis por tipo de uso do solo
+    Associa cada painel detectado a um tipo de uso do solo
     """
-    # TODO: Implementar lógica real de spatial join
-    print(f"[DEBUG] Executando spatial join entre {len(deteccoes)} detecções e {len(poligonos)} polígonos")
-    
-    # Mock: distribuição aleatória
-    import random
-    
-    tipos = ["residencial", "industrial", "comercial", "desconhecido"]
-    
-    # Inicializar contadores
-    contagem = {tipo: 0 for tipo in tipos}
-    
-    # Distribuir painéis aleatoriamente
-    for _ in deteccoes:
-        contagem[random.choice(tipos[:-1])] += 1  # exclui "desconhecido"
-    
-    return contagem
+    results = []
+
+    for det in detections:
+        point = Point(det["lon"], det["lat"])
+        matched_landuse = "unknown"
+
+        for poly in polygons:
+            if poly["geometry"].contains(point):
+                matched_landuse = poly["landuse"]
+                break
+
+        results.append({
+            "lat": det["lat"],
+            "lon": det["lon"],
+            "confidence": det["confidence"],
+            "landuse": matched_landuse
+        })
+
+    return results
+
+
+def aggregate_by_landuse(joined_data: list[dict]):
+    """
+    Agrega quantidade de painéis por tipo de uso do solo
+    """
+    summary = {}
+
+    for item in joined_data:
+        lu = item["landuse"]
+        summary[lu] = summary.get(lu, 0) + 1
+
+    return summary
