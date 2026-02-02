@@ -2,8 +2,6 @@ import time
 import logging
 import os
 from pathlib import Path
-
-from modules.geo_calculos import gerar_grid_coordenadas
 from modules.imagens import baixar_imagem_tile
 from yolo import detectar_paineis_imagem, salvar_imagem_com_boxes
 
@@ -12,6 +10,14 @@ from modules.osm import obter_poligonos_osm  # retorna {"polygons": [...], "succ
 from modules.spatial_join import spatial_join, aggregate_landuse  # :contentReference[oaicite:3]{index=3}
 from modules.analise import analisar_impacto_rede  # :contentReference[oaicite:4]{index=4}
 from modules.saida import formatar_output  # :contentReference[oaicite:5]{index=5}
+from io import BytesIO
+
+try:
+    from PIL import Image
+except Exception:
+    Image = None
+
+from modules.geo_calculos import gerar_grid_coordenadas, anexar_latlon_da_bbox
 
 
 logger = logging.getLogger("solarscan.pipeline")
@@ -69,6 +75,13 @@ def pipeline_solar_scan(dados_subestacao: dict, raio_calculado: float) -> dict:
 
             # detecta
             deteccoes = detectar_paineis_imagem(img_bytes) or []
+            if Image is not None:
+                try:
+                    img_w, img_h = Image.open(BytesIO(img_bytes)).size
+                except Exception:
+                    img_w, img_h = 1280, 1280
+            else:
+                img_w, img_h = 1280, 1280
 
             # marca origem da detecção + garante lat/lon (pra spatial_join não quebrar)
             for d in deteccoes:
@@ -78,11 +91,19 @@ def pipeline_solar_scan(dados_subestacao: dict, raio_calculado: float) -> dict:
                 d["tile_img_raw"] = str(raw_path)
                 d["tile_img_boxed"] = str(boxed_path)
 
-                # fallback: se o YOLO não forneceu lat/lon, usa centro do tile
                 if "lat" not in d or "lon" not in d:
-                    d["lat"] = float(t_lat)
-                    d["lon"] = float(t_lon)
-                    det_sem_latlon += 1
+                    ok = anexar_latlon_da_bbox(
+                        d,
+                        tile_lat=float(t_lat),
+                        tile_lon=float(t_lon),
+                        zoom=20,          # default do baixar_imagem_tile
+                        img_w=int(img_w),
+                        img_h=int(img_h),
+                    )
+                    if not ok:
+                        d["lat"] = float(t_lat)
+                        d["lon"] = float(t_lon)
+                        d["geo_fallback"] = "tile_center"
 
             todas_deteccoes.extend(deteccoes)
 

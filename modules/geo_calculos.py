@@ -91,3 +91,71 @@ def gerar_grid_coordenadas(lat: float, long: float, raio: float) -> list:
             grade.append((lat_nova, long_nova))
     i
     return grade
+
+import math
+from typing import Any, Optional, Tuple
+
+_R_WEBMERCATOR = 6378137.0  # metros
+
+def _meters_per_pixel_webmercator(lat: float, zoom: int) -> float:
+    return (math.cos(math.radians(lat)) * 2.0 * math.pi * _R_WEBMERCATOR) / (256.0 * (2.0 ** zoom))
+
+def _mercator_from_latlon(lat: float, lon: float) -> Tuple[float, float]:
+    x = _R_WEBMERCATOR * math.radians(lon)
+    y = _R_WEBMERCATOR * math.log(math.tan(math.pi / 4.0 + math.radians(lat) / 2.0))
+    return x, y
+
+def _latlon_from_mercator(x: float, y: float) -> Tuple[float, float]:
+    lon = math.degrees(x / _R_WEBMERCATOR)
+    lat = math.degrees(2.0 * math.atan(math.exp(y / _R_WEBMERCATOR)) - math.pi / 2.0)
+    return lat, lon
+
+def _bbox_center_px(det: Any) -> Optional[Tuple[float, float]]:
+    if not isinstance(det, dict):
+        return None
+
+    for k in ("bbox", "xyxy", "box"):
+        v = det.get(k)
+        if isinstance(v, (list, tuple)) and len(v) == 4:
+            x1, y1, x2, y2 = map(float, v)
+            return (x1 + x2) / 2.0, (y1 + y2) / 2.0
+
+    v = det.get("xywh")
+    if isinstance(v, (list, tuple)) and len(v) == 4:
+        cx, cy, _, _ = map(float, v)
+        return cx, cy
+
+    if all(k in det for k in ("x1", "y1", "x2", "y2")):
+        x1 = float(det["x1"]); y1 = float(det["y1"])
+        x2 = float(det["x2"]); y2 = float(det["y2"])
+        return (x1 + x2) / 2.0, (y1 + y2) / 2.0
+
+    return None
+
+def anexar_latlon_da_bbox(
+    det: dict,
+    tile_lat: float,
+    tile_lon: float,
+    zoom: int,
+    img_w: int,
+    img_h: int,
+) -> bool:
+    c = _bbox_center_px(det)
+    if c is None:
+        return False
+
+    cx, cy = c
+    mpp = _meters_per_pixel_webmercator(tile_lat, zoom)
+
+    dx = (cx - (img_w / 2.0)) * mpp
+    dy = (cy - (img_h / 2.0)) * mpp
+
+    x0, y0 = _mercator_from_latlon(tile_lat, tile_lon)
+
+    # y na imagem cresce pra baixo; no Mercator cresce pra cima
+    lat, lon = _latlon_from_mercator(x0 + dx, y0 - dy)
+
+    det["lat"] = float(lat)
+    det["lon"] = float(lon)
+    det["geo_fallback"] = "bbox_to_latlon"
+    return True

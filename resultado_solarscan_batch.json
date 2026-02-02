@@ -3,18 +3,95 @@
     "id": "SUB_BTF_CENTRO",
     "lat": -22.994598,
     "lon": -43.377366,
-    "erro": "Overpass API error: HTTPSConnectionPool(host='overpass-api.de', port=443): Max retries exceeded with url: /api/interpreter (Caused by SSLError(SSLCertVerificationError(1, '[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate in certificate chain (_ssl.c:1032)')))"
-  },
-  {
-    "id": "SUB_XYZ_VIZINHA",
-    "lat": -22.999391,
-    "lon": -43.431344,
-    "erro": "Overpass API error: HTTPSConnectionPool(host='overpass-api.de', port=443): Max retries exceeded with url: /api/interpreter (Caused by SSLError(SSLCertVerificationError(1, '[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate in certificate chain (_ssl.c:1032)')))"
-  },
-  {
-    "id": "SUB_RURAL_ISOLADA",
-    "lat": -23.011251,
-    "lon": -43.468282,
-    "erro": "Overpass API error: HTTPSConnectionPool(host='overpass-api.de', port=443): Max retries exceeded with url: /api/interpreter (Caused by SSLError(SSLCertVerificationError(1, '[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate in certificate chain (_ssl.c:1032)')))"
-  }
-]
+    "raio_m": 2775.36,
+    "tiles": [
+      [
+        -23.00708398601751,
+        -43.39092973771327
+      ],
+      [
+        -23.00708398601751,
+        -43.377366
+      ],
+      [
+        -23.00708398601751,
+        -43.36380226228673
+      ],
+      [
+        -22.994598,
+        -43.39092973771327
+      ],
+      [
+        -22.994598,
+        -43.377366
+      ],
+      [
+        -22.994598,
+        -43.36380226228673
+      ],
+      [
+        -22.98211201398249,
+        -43.39092973771327
+      ],
+      [
+        -22.98211201398249,
+        -43.377366
+      ],
+      [
+        -22.98211201398249,
+        -43.36380226228673
+      ]
+    ],
+    "deteccoes": [
+      {
+        "x": 1021.5128784179688,
+        "y": 1010.8610229492188,
+        "width": 48.49005126953125,
+        "height": 62.27423095703125,
+        "confidence": 0.3827022612094879,
+        "class_id": 0,
+        "tile_i": 6,
+        "tile_lat": -22.994598,
+        "tile_lon": -43.36380226228673,
+        "tile_img_raw": "C:\\Users\\Home\\Desktop\\Nova pasta (5)\\SolarScan-MVP\\debug_imagens\\raw\\SUB_BTF_CENTRO_tile_6.png",
+        "tile_img_boxed": "C:\\Users\\Home\\Desktop\\Nova pasta (5)\\SolarScan-MVP\\debug_imagens\\boxed\\SUB_BTF_CENTRO_tile_6_boxed.png",
+        "lat": -22.994598,
+        "lon": -43.36380226228673,
+        "geo_fallback": "tile_center"
+      },
+      {
+        "x": 813.2928466796875,
+        "y": 839.1428833007812,
+        "width": 14.82696533203125,
+        "height": 18.26568603515625,
+        "confidence": 0.43380582332611084,
+        "class_id": 0,
+        "tile_i": 9,
+        "tile_lat": -22.98211201398249,
+        "tile_lon": -43.36380226228673,
+        "tile_img_raw": "C:\\Users\\Home\\Desktop\\Nova pasta (5)\\SolarScan-MVP\\debug_imagens\\raw\\SUB_BTF_CENTRO_tile_9.png",
+        "tile_img_boxed": "C:\\Users\\Home\\Desktop\\Nova pasta (5)\\SolarScan-MVP\\debug_imagens\\boxed\\SUB_BTF_CENTRO_tile_9_boxed.png",
+        "lat": -22.98211201398249,
+        "lon": -43.36380226228673,
+        "geo_fallback": "tile_center"
+      },
+      {
+        "x": 796.0568237304688,
+        "y": 840.9586181640625,
+        "width": 14.83642578125,
+        "height": 15.39569091796875,
+        "confidence": 0.2508586347103119,
+        "class_id": 0,
+        "tile_i": 9,
+        "tile_lat": -22.98211201398249,
+        "tile_lon": -43.36380226228673,
+        "tile_img_raw": "C:\\Users\\Home\\Desktop\\Nova pasta (5)\\SolarScan-MVP\\debug_imagens\\raw\\SUB_BTF_CENTRO_tile_9.png",
+        "tile_img_boxed": "C:\\Users\\Home\\Desktop\\Nova pasta (5)\\SolarScan-MVP\\debug_imagens\\boxed\\SUB_BTF_CENTRO_tile_9_boxed.png",
+        "lat": -22.98211201398249,
+        "lon": -43.36380226228673,
+        "geo_fallback": "tile_center"
+      }
+    ],
+    "poligonos_osm": [
+      {
+        "geometry": 
