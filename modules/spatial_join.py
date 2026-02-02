@@ -1,39 +1,29 @@
 from shapely.geometry import Point
 
+def spatial_join(detections: list[dict], polygons: list[dict]) -> list[dict]:
 
-def spatial_join_panels_with_landuse(detections: list[dict], polygons: list[dict]):
-    """
-    Associa cada painel detectado a um tipo de uso do solo
-    """
-    results = []
+    result = []
 
     for det in detections:
         point = Point(det["lon"], det["lat"])
-        matched_landuse = "unknown"
+        landuse = next(
+            (p["landuse"] for p in polygons if p["geometry"].contains(point)),
+            "unknown"
+        )
 
-        for poly in polygons:
-            if poly["geometry"].contains(point):
-                matched_landuse = poly["landuse"]
-                break
-
-        results.append({
-            "lat": det["lat"],
-            "lon": det["lon"],
-            "confidence": det["confidence"],
-            "landuse": matched_landuse
+        result.append({
+            **det,
+            "landuse": landuse
         })
 
-    return results
+    return result
 
 
-def aggregate_by_landuse(joined_data: list[dict]):
+def aggregate_landuse(joined: list[dict]) -> dict:
     """
-    Agrega quantidade de painéis por tipo de uso do solo
+    Agrega contagem de painéis por uso do solo
     """
     summary = {}
-
-    for item in joined_data:
-        lu = item["landuse"]
-        summary[lu] = summary.get(lu, 0) + 1
-
+    for item in joined:
+        summary[item["landuse"]] = summary.get(item["landuse"], 0) + 1
     return summary

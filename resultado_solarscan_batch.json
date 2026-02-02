@@ -1,0 +1,20 @@
+[
+  {
+    "id": "SUB_BTF_CENTRO",
+    "lat": -22.994598,
+    "lon": -43.377366,
+    "erro": "Overpass API error: HTTPSConnectionPool(host='overpass-api.de', port=443): Max retries exceeded with url: /api/interpreter (Caused by SSLError(SSLCertVerificationError(1, '[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate in certificate chain (_ssl.c:1032)')))"
+  },
+  {
+    "id": "SUB_XYZ_VIZINHA",
+    "lat": -22.999391,
+    "lon": -43.431344,
+    "erro": "Overpass API error: HTTPSConnectionPool(host='overpass-api.de', port=443): Max retries exceeded with url: /api/interpreter (Caused by SSLError(SSLCertVerificationError(1, '[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate in certificate chain (_ssl.c:1032)')))"
+  },
+  {
+    "id": "SUB_RURAL_ISOLADA",
+    "lat": -23.011251,
+    "lon": -43.468282,
+    "erro": "Overpass API error: HTTPSConnectionPool(host='overpass-api.de', port=443): Max retries exceeded with url: /api/interpreter (Caused by SSLError(SSLCertVerificationError(1, '[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate in certificate chain (_ssl.c:1032)')))"
+  }
+]
