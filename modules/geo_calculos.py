@@ -89,7 +89,6 @@ def gerar_grid_coordenadas(lat: float, long: float, raio: float) -> list:
             lat_nova = lat + (i * step_lat)
             long_nova = long + (j * step_lon)
             grade.append((lat_nova, long_nova))
-    i
     return grade
 
 import math
@@ -114,21 +113,30 @@ def _bbox_center_px(det: Any) -> Optional[Tuple[float, float]]:
     if not isinstance(det, dict):
         return None
 
+    # formatos comuns com 4 valores
     for k in ("bbox", "xyxy", "box"):
         v = det.get(k)
         if isinstance(v, (list, tuple)) and len(v) == 4:
             x1, y1, x2, y2 = map(float, v)
             return (x1 + x2) / 2.0, (y1 + y2) / 2.0
 
+    # formato centro + tamanho
     v = det.get("xywh")
     if isinstance(v, (list, tuple)) and len(v) == 4:
         cx, cy, _, _ = map(float, v)
         return cx, cy
 
+    # formato com chaves explícitas
     if all(k in det for k in ("x1", "y1", "x2", "y2")):
         x1 = float(det["x1"]); y1 = float(det["y1"])
         x2 = float(det["x2"]); y2 = float(det["y2"])
         return (x1 + x2) / 2.0, (y1 + y2) / 2.0
+
+    # ✅ formato do seu YOLO (x, y, width, height) onde (x,y) é canto superior esquerdo
+    if all(k in det for k in ("x", "y", "width", "height")):
+        x = float(det["x"]); y = float(det["y"])
+        w = float(det["width"]); h = float(det["height"])
+        return x + (w / 2.0), y + (h / 2.0)
 
     return None
 

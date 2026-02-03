@@ -10,28 +10,51 @@ from ultralytics import YOLO
 @lru_cache(maxsize=1)
 def _load_model():
     """
-    Carrega o modelo com sistema de fallback (segurança).
-    Tenta carregar o modelo customizado; se falhar, carrega o oficial.
+    Carrega o modelo uma vez só (cache) com fallback.
+    Prioridade:
+      1) YOLO_WEIGHTS (caminho absoluto ou relativo ao projeto)
+      2) ./models/best.pt (procurando do diretório do arquivo pra cima)
+      3) fallback oficial (yolov8n.pt)
     """
-    project_root = Path(__file__).resolve().parent
-    default_weights = project_root / "models" / "best.pt"
+    def _resolve_path(p: Path) -> Path:
+        try:
+            return p.expanduser().resolve()
+        except Exception:
+            return p
 
-    weights_path = Path(os.getenv("YOLO_WEIGHTS", str(default_weights)))
-    if not weights_path.is_absolute():
-        weights_path = (project_root / weights_path).resolve()
+    def _find_best_pt() -> Path | None:
+        env = os.getenv("YOLO_WEIGHTS")
+        if env:
+            p = _resolve_path(Path(env))
+            if p.exists():
+                return p
 
+        here = Path(__file__).resolve()
+        # procura em .../models/best.pt subindo diretórios
+        for base in [here.parent, *here.parents]:
+            cand = base / "models" / "best.pt"
+            if cand.exists():
+                return cand
+
+        # como último recurso, tenta "best.pt" no mesmo diretório
+        cand = here.parent / "best.pt"
+        if cand.exists():
+            return cand
+
+        return None
+
+    weights_path = _find_best_pt()
     print(f"[YOLO] Tentando carregar modelo: {weights_path}", flush=True)
 
     try:
-        if weights_path.exists():
+        if weights_path:
             return YOLO(str(weights_path))
-        print(f"[YOLO] Aviso: Arquivo {weights_path} não existe.", flush=True)
-        raise FileNotFoundError("Modelo customizado não encontrado")
-
+        raise FileNotFoundError("best.pt não encontrado (YOLO_WEIGHTS ou ./models/best.pt)")
     except Exception as e:
-        print(f"[YOLO] ⚠️ ERRO CRÍTICO ao carregar '{weights_path.name}': {e}", flush=True)
-        print("[YOLO] 🔄 Ativando FALLBACK: Usando modelo padrão 'yolov8n.pt'...", flush=True)
+        print(f"[YOLO] ⚠️ ERRO ao carregar pesos customizados: {e}", flush=True)
+        print("[YOLO] 🔄 FALLBACK: yolov8n.pt", flush=True)
         return YOLO("yolov8n.pt")
+
 
 
 def detectar_paineis_imagem(imagem_bytes: bytes) -> list:

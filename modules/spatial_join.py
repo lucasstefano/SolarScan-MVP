@@ -25,7 +25,7 @@ def spatial_join(detections: list[dict], polygons: list[dict]) -> list[dict]:
         best_score = 0
 
         for geom, lu in prepared:
-            hit = geom.covers(pt) if use_prepared else geom.covers(pt)
+            hit = (geom.contains(pt) or geom.intersects(pt)) if use_prepared else geom.covers(pt)
             if not hit:
                 continue
 

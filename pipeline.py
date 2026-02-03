@@ -2,22 +2,30 @@ import time
 import logging
 import os
 from pathlib import Path
+from io import BytesIO
+
 from modules.imagens import baixar_imagem_tile
+from modules.geo_calculos import gerar_grid_coordenadas, anexar_latlon_da_bbox
+
+# YOLO (arquivo yolo.py na raiz do projeto, como você está usando)
 from yolo import detectar_paineis_imagem, salvar_imagem_com_boxes
 
-# NOVOS IMPORTS (OSM + join + análise + output)
-from modules.osm import obter_poligonos_osm  # retorna {"polygons": [...], "success": True}  :contentReference[oaicite:2]{index=2}
-from modules.spatial_join import spatial_join, aggregate_landuse  # :contentReference[oaicite:3]{index=3}
-from modules.analise import analisar_impacto_rede  # :contentReference[oaicite:4]{index=4}
-from modules.saida import formatar_output  # :contentReference[oaicite:5]{index=5}
-from io import BytesIO
+# OSM + join + análise + output
+from modules.osm import obter_poligonos_osm
+from modules.spatial_join import spatial_join, aggregate_landuse
+from modules.analise import analisar_impacto_rede
+from modules.saida import formatar_output
+
+# serialização de polígonos (debug seguro)
+try:
+    from shapely.geometry import mapping
+except Exception:
+    mapping = None
 
 try:
     from PIL import Image
 except Exception:
     Image = None
-
-from modules.geo_calculos import gerar_grid_coordenadas, anexar_latlon_da_bbox
 
 
 logger = logging.getLogger("solarscan.pipeline")
@@ -29,14 +37,56 @@ if not logger.handlers:
     logger.propagate = False
 
 
+def _ensure_float(x, default: float) -> float:
+    try:
+        if x is None:
+            return float(default)
+        return float(x)
+    except Exception:
+        return float(default)
+
+
+def _poligonos_para_json(poligonos: list) -> list:
+    """
+    Converte lista de polígonos do OSM para formato serializável.
+    Se shapely+mapping disponível, converte geometry para GeoJSON-like.
+    Caso contrário, retorna só landuse (pra não quebrar json.dump).
+    """
+    out = []
+    if not poligonos:
+        return out
+
+    for p in poligonos:
+        if not isinstance(p, dict):
+            continue
+
+        lu = str(p.get("landuse", "unknown"))
+
+        # melhor caso: mapping disponível e geometry presente
+        if mapping is not None and "geometry" in p:
+            try:
+                out.append({"landuse": lu, "geometry": mapping(p["geometry"])})
+                continue
+            except Exception:
+                # cai pro modo "só landuse"
+                pass
+
+        out.append({"landuse": lu})
+
+    return out
+
+
 def pipeline_solar_scan(dados_subestacao: dict, raio_calculado: float) -> dict:
     sub_id = dados_subestacao["id"]
-    lat = float(dados_subestacao["lat"])
-    lon = float(dados_subestacao["lon"])
+    lat = _ensure_float(dados_subestacao.get("lat"), 0.0)
+    lon = _ensure_float(dados_subestacao.get("lon"), 0.0)
+
+    # ✅ evita quebrar quando o main passar None
+    raio_m = _ensure_float(raio_calculado, default=float(os.getenv("RAIO_PADRAO_METROS", "500.0")))
 
     t0 = time.time()
     logger.info("-" * 55)
-    logger.info("INICIO | sub=%s | lat=%.6f lon=%.6f | raio=%.2fm", sub_id, lat, lon, raio_calculado)
+    logger.info("INICIO | sub=%s | lat=%.6f lon=%.6f | raio=%.2fm", sub_id, lat, lon, raio_m)
 
     # Pasta debug (com subpastas)
     debug_root = Path(os.getenv("DEBUG_DIR", "debug_imagens")).resolve()
@@ -48,7 +98,7 @@ def pipeline_solar_scan(dados_subestacao: dict, raio_calculado: float) -> dict:
 
     # [1/6] Grid
     logger.info("[1/6] Gerando grid...")
-    tiles = gerar_grid_coordenadas(lat, lon, raio_calculado)
+    tiles = gerar_grid_coordenadas(lat, lon, raio_m)
     logger.info("[1/6] Grid pronto | tiles=%d", len(tiles))
 
     # [2/6] Imagens + YOLO
@@ -60,10 +110,10 @@ def pipeline_solar_scan(dados_subestacao: dict, raio_calculado: float) -> dict:
 
     for i, (t_lat, t_lon) in enumerate(tiles, 1):
         try:
-            img_bytes = baixar_imagem_tile(t_lat, t_lon)
+            img_bytes = baixar_imagem_tile(float(t_lat), float(t_lon))
             if not img_bytes:
                 tiles_fail += 1
-                logger.warning("Tile %d/%d vazio | lat=%.6f lon=%.6f", i, len(tiles), t_lat, t_lon)
+                logger.warning("Tile %d/%d vazio | lat=%.6f lon=%.6f", i, len(tiles), float(t_lat), float(t_lon))
                 continue
 
             base = f"{sub_id}_tile_{i}"
@@ -75,6 +125,8 @@ def pipeline_solar_scan(dados_subestacao: dict, raio_calculado: float) -> dict:
 
             # detecta
             deteccoes = detectar_paineis_imagem(img_bytes) or []
+
+            # tamanho real da imagem (pra conversão bbox->latlon)
             if Image is not None:
                 try:
                     img_w, img_h = Image.open(BytesIO(img_bytes)).size
@@ -83,9 +135,9 @@ def pipeline_solar_scan(dados_subestacao: dict, raio_calculado: float) -> dict:
             else:
                 img_w, img_h = 1280, 1280
 
-            # marca origem da detecção + garante lat/lon (pra spatial_join não quebrar)
+            # marca origem + garante lat/lon
             for d in deteccoes:
-                d["tile_i"] = i
+                d["tile_i"] = int(i)
                 d["tile_lat"] = float(t_lat)
                 d["tile_lon"] = float(t_lon)
                 d["tile_img_raw"] = str(raw_path)
@@ -96,7 +148,7 @@ def pipeline_solar_scan(dados_subestacao: dict, raio_calculado: float) -> dict:
                         d,
                         tile_lat=float(t_lat),
                         tile_lon=float(t_lon),
-                        zoom=20,          # default do baixar_imagem_tile
+                        zoom=20,  # default do baixar_imagem_tile
                         img_w=int(img_w),
                         img_h=int(img_h),
                     )
@@ -104,10 +156,11 @@ def pipeline_solar_scan(dados_subestacao: dict, raio_calculado: float) -> dict:
                         d["lat"] = float(t_lat)
                         d["lon"] = float(t_lon)
                         d["geo_fallback"] = "tile_center"
+                        det_sem_latlon += 1
 
             todas_deteccoes.extend(deteccoes)
 
-            # salva versão com boxes (se quiser salvar sempre, remova o if)
+            # salva versão com boxes
             if deteccoes:
                 salvar_imagem_com_boxes(img_bytes, deteccoes, boxed_path)
                 logger.info("Tile %d/%d ok | detec=%d | boxed=%s", i, len(tiles), len(deteccoes), boxed_path.name)
@@ -129,8 +182,9 @@ def pipeline_solar_scan(dados_subestacao: dict, raio_calculado: float) -> dict:
 
     # [3/6] OSM
     logger.info("[3/6] Obtendo contexto urbano (OSM)...")
-    poligonos_resp = obter_poligonos_osm(lat, lon, raio_calculado)
-    poligonos = (poligonos_resp or {}).get("polygons", [])
+    poligonos_resp = obter_poligonos_osm(lat, lon, raio_m)
+    poligonos = (poligonos_resp or {}).get("polygons", []) or []
+    poligonos_serializaveis = _poligonos_para_json(poligonos)
     logger.info("[3/6] OSM ok | poligonos=%d", len(poligonos))
 
     # [4/6] Spatial Join
@@ -138,12 +192,12 @@ def pipeline_solar_scan(dados_subestacao: dict, raio_calculado: float) -> dict:
     joined = spatial_join(todas_deteccoes, poligonos)
     contagem_landuse_en = aggregate_landuse(joined)
 
-    # Mapeia para chaves PT que seus módulos esperam (residencial/comercial/industrial)
     contagem_por_tipo = {
         "residencial": int(contagem_landuse_en.get("residential", 0)),
         "comercial": int(contagem_landuse_en.get("commercial", 0)),
         "industrial": int(contagem_landuse_en.get("industrial", 0)),
     }
+
     logger.info(
         "[4/6] Join ok | residencial=%d comercial=%d industrial=%d (unknown=%d)",
         contagem_por_tipo["residencial"],
@@ -174,19 +228,23 @@ def pipeline_solar_scan(dados_subestacao: dict, raio_calculado: float) -> dict:
         sub_id, tiles_ok, tiles_fail, total_paineis, elapsed
     )
 
-    # Mantém seu retorno antigo + adiciona os novos artefatos
+    # ✅ Retorno 100% JSON-serializável (sem shapely bruto)
     return {
         "id": sub_id,
         "lat": lat,
         "lon": lon,
-        "raio_m": float(raio_calculado),
-        "tiles": tiles,
-        "deteccoes": todas_deteccoes,
-        "poligonos_osm": poligonos,              # polígonos shapely (debug)
-        "joined": joined,                        # deteccoes + landuse (debug)
-        "contagem_por_tipo": contagem_por_tipo,  # pt (para análise/output)
+        "raio_m": float(raio_m),
+
+        "tiles": tiles,  # tuples viram listas no json.dump (ok)
+
+        "deteccoes": todas_deteccoes,          # dicts com float/int/str (ok)
+        "poligonos_osm": poligonos_serializaveis,  # GeoJSON-like (ok)
+        "joined": joined,                      # lista de pontos + landuse (ok)
+
+        "contagem_por_tipo": contagem_por_tipo,
         "impacto": impacto,
-        "output": output,                        # JSON final (o que você quer entregar)
+        "output": output,
+
         "debug_dir": str(debug_root),
         "stats": {
             "tiles_total": len(tiles),

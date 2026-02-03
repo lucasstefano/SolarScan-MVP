@@ -1,4 +1,7 @@
+from datetime import datetime, timezone
 """
+
+from datetime import datetime, timezone
 Módulo para formatação do output final.
 """
 
@@ -40,7 +43,7 @@ def formatar_output(id_subestacao: str, lat: float, lon: float,
         "qnt_aprox_placa": total_paineis,
         "penetracao_mmgd": impacto.get("penetracao_mmgd", "INDEFINIDO"),
         "risco_duck_curve": impacto.get("risco_duck_curve", "INDEFINIDO"),
-        "timestamp_processamento": "2024-01-15T10:30:00Z",  # TODO: usar timestamp real
+        "timestamp_processamento": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "versao_pipeline": "1.0.0-mvp"
     }
     

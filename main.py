@@ -3,7 +3,7 @@ import time
 from modules.entrada import receber_requisicao
 from modules.geo_calculos import calcular_raios_dinamicos
 from pipeline import pipeline_solar_scan
-# - se for outro nome, ajuste aqui.
+
 
 def main() -> None:
     entrada_batch = [
@@ -35,7 +35,9 @@ def main() -> None:
     print(f"   🔎 Raios definidos pelo algoritmo: {json.dumps(mapa_de_raios, indent=2, ensure_ascii=False)}")
 
     # 3) Pipeline
-    resultados_finais = []
+    outputs_finais = []
+    debug_finais = []  # opcional: salva infos extras (sem shapely)
+
     print(f"\n🔄 Iniciando processamento sequencial de {len(dados_validos)} ativos...")
 
     for i, sub in enumerate(dados_validos, start=1):
@@ -49,26 +51,50 @@ def main() -> None:
 
         try:
             resultado = pipeline_solar_scan(sub, raio_otimizado)
+
+            # ✅ SALVA SÓ O JSON FINAL (serializável)
+            output = resultado.get("output")
+            if not isinstance(output, dict):
+                raise TypeError("pipeline_solar_scan deve retornar um dict com a chave 'output' (dict).")
+
+            outputs_finais.append(output)
+
+            # (opcional) debug SEM shapely: só métricas e contagens simples
+            debug_finais.append({
+                "id": sub_id,
+                "tiles": resultado.get("tiles"),
+                "deteccoes_total": resultado.get("deteccoes_total"),
+                "det_sem_latlon": resultado.get("det_sem_latlon"),
+                "contagem_por_tipo": resultado.get("contagem_por_tipo"),
+                "impacto": resultado.get("impacto"),
+            })
+
         except Exception as e:
             # Não quebra o batch inteiro — registra erro por ativo
-            resultado = {
-                "id": sub_id,
-                "lat": sub["lat"],
-                "lon": sub["lon"],
+            outputs_finais.append({
+                "id_subestacao": sub_id,
+                "latitude_sub": round(float(sub["lat"]), 6),
+                "longitude_sub": round(float(sub["lon"]), 6),
                 "erro": str(e),
-            }
+                "versao_pipeline": "1.0.0-mvp",
+            })
 
-        resultados_finais.append(resultado)
-
-    # 4) Salvar
+    # 4) Salvar (só JSON serializável)
     output_path = "resultado_solarscan_batch.json"
     print("\n💾 Salvando relatório consolidado...")
     with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(resultados_finais, f, indent=2, ensure_ascii=False)
+        json.dump(outputs_finais, f, indent=2, ensure_ascii=False)
+
+    # (opcional) arquivo de debug separado (também serializável)
+    debug_path = "debug_solarscan_batch.json"
+    with open(debug_path, "w", encoding="utf-8") as f:
+        json.dump(debug_finais, f, indent=2, ensure_ascii=False)
 
     elapsed = time.time() - start_time
     print(f"\n🏁 Processo concluído em {elapsed:.2f} segundos!")
     print(f"✅ Resultados salvos em '{output_path}'")
+    print(f"🧪 Debug salvo em '{debug_path}'")
+
 
 if __name__ == "__main__":
     main()
