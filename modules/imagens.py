@@ -10,6 +10,10 @@ except Exception:
 
 """
 Módulo para aquisição de imagens de satélite.
+
+⚠️ Importante:
+- NÃO hardcode API keys no código.
+- Use GOOGLE_MAPS_API_KEY via variável de ambiente.
 """
 
 GOOGLE_STATIC_MAPS_URL = "https://maps.googleapis.com/maps/api/staticmap"
@@ -27,6 +31,15 @@ def baixar_imagem_tile(
 ) -> bytes:
     """
     Baixa imagem de satélite do Google Maps Static API.
+
+    Args:
+        lat/lon: centro do tile
+        zoom: zoom (deve ser consistente com geo_calculos.anexar_latlon_da_bbox)
+        size: ex "640x640"
+        scale: 1 ou 2
+        img_format: "png" ou "jpg"
+        timeout_s: timeout do request
+        retries: tentativas com backoff para 429/5xx
     """
     api_key = "AIzaSyAHbiO3fZ-GUeg6g-Q53qyJnZ9Q0F_54Sc"
     if not api_key:
@@ -34,11 +47,11 @@ def baixar_imagem_tile(
 
     params = {
         "center": f"{lat},{lon}",
-        "zoom": str(zoom),
+        "zoom": str(int(zoom)),
         "size": size,
-        "scale": str(scale),
+        "scale": str(int(scale)),
         "maptype": "satellite",
-        "format": img_format,  # "png" ou "jpg"
+        "format": img_format,
         "key": api_key,
     }
 
