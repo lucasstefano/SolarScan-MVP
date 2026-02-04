@@ -1,499 +1,359 @@
-# pipeline.py
 from __future__ import annotations
 
 import os
 import time
-import logging
 from pathlib import Path
-from io import BytesIO
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Callable, Dict, Any, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from io import BytesIO
+
+from PIL import Image
 
 from modules.imagens import baixar_imagem_tile
-from modules.geo_calculos import gerar_grid_coordenadas, anexar_latlon_da_bbox
+from modules.geo_calculos import gerar_grid_coordenadas
+from modules.geo_calculos import anexar_latlon_da_bbox  # opcional (se quiser lat/lon por det)
 
-# YOLO (arquivo yolo.py na raiz do projeto)
 from yolo import detectar_paineis_imagem
 
-# Landuse + join + análise + output
-from modules.landuse_provider import get_landuse_polygons
-from modules.spatial_join import spatial_join, aggregate_landuse
-from modules.analise import analisar_impacto_rede
-from modules.saida import formatar_output
 
-# serialização de polígonos (debug seguro)
-try:
-    from shapely.geometry import mapping
-except Exception:
-    mapping = None
-
-try:
-    from PIL import Image, ImageDraw, ImageFont
-except Exception:
-    Image = None
-    ImageDraw = None
-    ImageFont = None
-
-
-logger = logging.getLogger("solarscan.pipeline")
-if not logger.handlers:
-    logger.setLevel(logging.INFO)
-    handler = logging.StreamHandler()
-    handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s", "%H:%M:%S"))
-    logger.addHandler(handler)
-    logger.propagate = False
-
-
-# -----------------------------------------------------------------------------
-# Helpers
-# -----------------------------------------------------------------------------
-
-def _ensure_float(x, default: float) -> float:
+def _ensure_int(v, default: int) -> int:
     try:
-        if x is None:
-            return float(default)
-        return float(x)
+        return int(v)
     except Exception:
-        return float(default)
+        return default
 
-def _ensure_int(x, default: int) -> int:
+
+# ----------------------------
+# Upgrade #1: prioridade centro -> bordas
+# ----------------------------
+def _sort_tiles_center_out(tiles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Ordena tiles para começar pelo centro (r1c1), depois cruz (dist 1),
+    depois cantos (dist 2). Mantém determinístico.
+    """
+    def key(t):
+        r, c = int(t["row"]), int(t["col"])
+        manhattan = abs(r - 1) + abs(c - 1)
+        # tie-break: primeiro mais ao norte (row menor), depois mais a oeste (col menor)
+        return (manhattan, r, c)
+    return sorted(tiles, key=key)
+
+
+# ----------------------------
+# Upgrade #2: deduplicação cross-tile (IoU) em coordenadas do mosaico
+# ----------------------------
+def _bbox_to_mosaic_pct(row: int, col: int, det: Dict[str, Any], img_w: int, img_h: int) -> Optional[Dict[str, float]]:
+    """
+    Converte bbox do tile para % no mosaico inteiro (0..100).
+    Assume mosaico 3x3: cada tile ocupa 1/3 em largura e altura.
+    """
     try:
-        if x is None:
-            return int(default)
-        return int(x)
+        x = float(det["x"]); y = float(det["y"])
+        w = float(det["width"]); h = float(det["height"])
+        if img_w <= 0 or img_h <= 0:
+            return None
+
+        tile_left = (col / 3.0) * 100.0
+        tile_top  = (row / 3.0) * 100.0
+
+        left = tile_left + (x / img_w) * (100.0 / 3.0)
+        top  = tile_top  + (y / img_h) * (100.0 / 3.0)
+        width  = (w / img_w) * (100.0 / 3.0)
+        height = (h / img_h) * (100.0 / 3.0)
+
+        # clamp leve
+        left = max(0.0, min(100.0, left))
+        top = max(0.0, min(100.0, top))
+        width = max(0.0, min(100.0 - left, width))
+        height = max(0.0, min(100.0 - top, height))
+
+        return {"left": left, "top": top, "width": width, "height": height}
     except Exception:
-        return int(default)
+        return None
 
-def _poligonos_para_json(poligonos: list) -> list:
+
+def _iou(a: Dict[str, float], b: Dict[str, float]) -> float:
+    ax1, ay1 = a["left"], a["top"]
+    ax2, ay2 = a["left"] + a["width"], a["top"] + a["height"]
+    bx1, by1 = b["left"], b["top"]
+    bx2, by2 = b["left"] + b["width"], b["top"] + b["height"]
+
+    inter_x1 = max(ax1, bx1)
+    inter_y1 = max(ay1, by1)
+    inter_x2 = min(ax2, bx2)
+    inter_y2 = min(ay2, by2)
+
+    iw = max(0.0, inter_x2 - inter_x1)
+    ih = max(0.0, inter_y2 - inter_y1)
+    inter = iw * ih
+
+    area_a = max(0.0, (ax2 - ax1)) * max(0.0, (ay2 - ay1))
+    area_b = max(0.0, (bx2 - bx1)) * max(0.0, (by2 - by1))
+    denom = area_a + area_b - inter
+    if denom <= 0.0:
+        return 0.0
+    return inter / denom
+
+
+class _GlobalDeduper:
     """
-    Converte lista de polígonos (shapely) para formato serializável.
-
-    - Se shapely+mapping disponível, converte geometry para GeoJSON-like.
-    - Caso contrário, retorna só landuse (pra não quebrar json.dump).
+    Mantém uma lista de boxes aceitos em coordenadas do mosaico (%).
+    Se um novo box sobrepõe acima do threshold, mantém o de maior conf.
     """
-    out = []
-    if not poligonos:
-        return out
+    def __init__(self, iou_thresh: float = 0.5):
+        self.iou_thresh = float(iou_thresh)
+        # cada item: {"id": str, "bbox": {left,top,width,height}, "conf": float}
+        self.keep: List[Dict[str, Any]] = []
+        self._counter = 0
 
-    for p in poligonos:
-        if not isinstance(p, dict):
-            continue
+    def add(self, bbox: Dict[str, float], conf: float) -> Tuple[bool, Optional[Dict[str, Any]]]:
+        """
+        Retorna:
+          (accepted, replaced_item_or_None)
+        - accepted=True: deve emitir pro front (novo ou substituiu um anterior)
+        - replaced_item: se substituiu, retorna o item antigo (pra front remover pelo id)
+        """
+        conf = float(conf or 0.0)
 
-        lu = str(p.get("landuse", "unknown"))
+        best_j = None
+        best_iou = 0.0
+        for j, it in enumerate(self.keep):
+            v = _iou(bbox, it["bbox"])
+            if v > best_iou:
+                best_iou = v
+                best_j = j
 
-        if mapping is not None and "geometry" in p:
-            try:
-                out.append({"landuse": lu, "geometry": mapping(p["geometry"])})
-                continue
-            except Exception:
-                pass
+        if best_j is None or best_iou < self.iou_thresh:
+            self._counter += 1
+            new = {"id": f"det_{self._counter}", "bbox": bbox, "conf": conf}
+            self.keep.append(new)
+            return True, None
 
-        out.append({"landuse": lu})
+        # conflito: decide por conf
+        existing = self.keep[best_j]
+        if conf > float(existing["conf"]):
+            self._counter += 1
+            new = {"id": f"det_{self._counter}", "bbox": bbox, "conf": conf}
+            self.keep[best_j] = new
+            return True, existing
 
-    return out
-
-def _get_bbox_xyxy(det: Dict[str, Any]) -> Optional[Tuple[float, float, float, float]]:
-    """
-    Normaliza bbox para (x1,y1,x2,y2) em pixels.
-    Suporta formatos: bbox/xyxy/box=[x1,y1,x2,y2], x1..y2, xywh, x/y/width/height.
-    """
-    for k in ("bbox", "xyxy", "box"):
-        v = det.get(k)
-        if isinstance(v, (list, tuple)) and len(v) == 4:
-            try:
-                x1, y1, x2, y2 = map(float, v)
-                return x1, y1, x2, y2
-            except Exception:
-                pass
-
-    if all(k in det for k in ("x1", "y1", "x2", "y2")):
-        try:
-            return float(det["x1"]), float(det["y1"]), float(det["x2"]), float(det["y2"])
-        except Exception:
-            pass
-
-    v = det.get("xywh")
-    if isinstance(v, (list, tuple)) and len(v) == 4:
-        try:
-            cx, cy, w, h = map(float, v)
-            return cx - (w / 2.0), cy - (h / 2.0), cx + (w / 2.0), cy + (h / 2.0)
-        except Exception:
-            pass
-
-    if all(k in det for k in ("x", "y", "width", "height")):
-        try:
-            x = float(det["x"]); y = float(det["y"])
-            w = float(det["width"]); h = float(det["height"])
-            return x, y, x + w, y + h
-        except Exception:
-            pass
-
-    return None
-
-def _annotate_debug_image(raw_path: Path, detections: List[Dict[str, Any]], out_path: Path) -> bool:
-    """
-    Gera evidência visual:
-    - Caixa (amarela) + label textual (RESIDENCIAL/COMERCIAL/INDUSTRIAL/UNKNOWN) acima da caixa.
-    """
-    if Image is None or ImageDraw is None:
-        return False
-
-    try:
-        img = Image.open(str(raw_path)).convert("RGB")
-        draw = ImageDraw.Draw(img)
-
-        font = None
-        if ImageFont is not None:
-            try:
-                font = ImageFont.load_default()
-            except Exception:
-                font = None
-
-        for det in detections or []:
-            bb = _get_bbox_xyxy(det)
-            if bb is None:
-                continue
-
-            x1, y1, x2, y2 = bb
-            draw.rectangle([x1, y1, x2, y2], outline="yellow", width=3)
-
-            lu = str(det.get("landuse", "unknown")).upper()
-            conf = str(det.get("landuse_confidence", "")).upper()
-            label = lu if not conf else f"{lu} ({conf})"
-
-            tx, ty = x1, max(0, y1 - 14)
-            try:
-                tw, th = draw.textsize(label, font=font)  # pillow <10
-            except Exception:
-                tw, th = (len(label) * 6, 12)
-
-            draw.rectangle([tx, ty, tx + tw + 6, ty + th + 4], fill=(0, 0, 0))
-            draw.text((tx + 3, ty + 2), label, fill="white", font=font)
-
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        img.save(str(out_path))
-        return True
-    except Exception as e:
-        logger.warning("Falha ao anotar imagem %s | %s", raw_path.name, str(e))
-        return False
+        return False, None
 
 
-# -----------------------------------------------------------------------------
-# Paralelo: processamento por tile
-# -----------------------------------------------------------------------------
-
-def _process_tile(
+def _process_tile_raw_and_dets(
     *,
     sub_id: str,
-    i: int,
-    t_lat: float,
-    t_lon: float,
+    run_id: str,
+    tile: Dict[str, Any],
+    raw_dir: Path,
     zoom: int,
     tile_size: str,
     tile_scale: int,
-    raw_dir: Path,
-    boxed_dir: Path,
 ) -> Dict[str, Any]:
     """
-    Processa 1 tile: baixa imagem, salva raw, roda YOLO, anexa metadados/latlon.
-    Retorna: {"ok": bool, "detections": [...], "raw_path": str, "boxed_path": str, "det_sem_latlon": int}
+    1 tile:
+      - baixa RAW
+      - salva RAW
+      - roda YOLO e retorna dets (x,y,w,h,confidence)
     """
+    row = int(tile["row"])
+    col = int(tile["col"])
+    tile_i = int(tile["tile_i"])
+    t_lat = float(tile["lat"])
+    t_lon = float(tile["lon"])
+
+    img_bytes = baixar_imagem_tile(float(t_lat), float(t_lon), zoom=zoom, size=tile_size, scale=tile_scale)
+    if not img_bytes:
+        return {"ok": False, "row": row, "col": col, "tile_i": tile_i, "error": "tile vazio"}
+
+    raw_name = f"tile_r{row}_c{col}.png"
+    raw_path = raw_dir / raw_name
+    raw_path.write_bytes(img_bytes)
+
     try:
-        img_bytes = baixar_imagem_tile(float(t_lat), float(t_lon), zoom=zoom, size=tile_size, scale=tile_scale)
-        if not img_bytes:
-            return {"ok": False, "detections": [], "raw_path": "", "boxed_path": "", "det_sem_latlon": 0, "error": "tile vazio"}
+        img = Image.open(BytesIO(img_bytes))
+        img_w, img_h = img.size
+    except Exception:
+        img_w, img_h = 1280, 1280
 
-        base = f"{sub_id}_tile_{i}"
-        raw_path = raw_dir / f"{base}.png"
-        boxed_path = boxed_dir / f"{base}_boxed.png"
-        raw_path.write_bytes(img_bytes)
+    dets = detectar_paineis_imagem(img_bytes) or []
 
-        deteccoes = detectar_paineis_imagem(img_bytes) or []
+    # opcional: adicionar lat/lon por detecção (best effort)
+    for d in dets:
+        d["tile_i"] = tile_i
+        d["row"] = row
+        d["col"] = col
+        d["img_w"] = img_w
+        d["img_h"] = img_h
+        d["tile_lat"] = float(t_lat)
+        d["tile_lon"] = float(t_lon)
+        d["tile_zoom"] = int(zoom)
+        try:
+            anexar_latlon_da_bbox(d, float(t_lat), float(t_lon), int(zoom), int(img_w), int(img_h))
+        except Exception:
+            pass
 
-        # tamanho real da imagem (pra conversão bbox->latlon)
-        if Image is not None:
-            try:
-                img_w, img_h = Image.open(BytesIO(img_bytes)).size
-            except Exception:
-                img_w, img_h = 1280, 1280
-        else:
-            img_w, img_h = 1280, 1280
-
-        det_sem_latlon = 0
-        for d in deteccoes:
-            d["tile_i"] = int(i)
-            d["tile_lat"] = float(t_lat)
-            d["tile_lon"] = float(t_lon)
-            d["tile_zoom"] = int(zoom)
-            d["tile_img_w"] = int(img_w)
-            d["tile_img_h"] = int(img_h)
-            d["tile_img_raw"] = str(raw_path)
-            d["tile_img_boxed"] = str(boxed_path)
-
-            if "lat" not in d or "lon" not in d:
-                ok = anexar_latlon_da_bbox(
-                    d,
-                    tile_lat=float(t_lat),
-                    tile_lon=float(t_lon),
-                    zoom=int(zoom),
-                    img_w=int(img_w),
-                    img_h=int(img_h),
-                )
-                if not ok:
-                    d["lat"] = float(t_lat)
-                    d["lon"] = float(t_lon)
-                    d["geo_fallback"] = "tile_center"
-                    det_sem_latlon += 1
-
-        return {
-            "ok": True,
-            "detections": deteccoes,
-            "raw_path": str(raw_path),
-            "boxed_path": str(boxed_path),
-            "det_sem_latlon": int(det_sem_latlon),
-        }
-
-    except Exception as e:
-        return {"ok": False, "detections": [], "raw_path": "", "boxed_path": "", "det_sem_latlon": 0, "error": str(e)}
+    return {
+        "ok": True,
+        "row": row,
+        "col": col,
+        "tile_i": tile_i,
+        "raw_name": raw_name,
+        "img_w": img_w,
+        "img_h": img_h,
+        "dets": dets,
+    }
 
 
-# -----------------------------------------------------------------------------
-# Core pipeline
-# -----------------------------------------------------------------------------
+def pipeline_stream_mosaico(
+    sub: Dict[str, Any],
+    raio_m: float,
+    *,
+    run_id: str,
+    emit: Callable[[dict], None],
+) -> Dict[str, Any]:
+    """
+    Pipeline streaming “mosaico RAW + overlay”
+    Upgrade #1: prioridade centro->bordas
+    Upgrade #2: dedup cross-tile com IoU em coords do mosaico
+    """
+    sub_id = str(sub.get("id") or "SUB")
+    lat = float(sub["lat"])
+    lon = float(sub["lon"])
 
-def _pipeline_core(sub_id: str, lat: float, lon: float, raio_m: float) -> dict:
-    # zoom e tamanho do tile usados pelo baixar_imagem_tile (devem ficar consistentes com geo_calculos.anexar_latlon_da_bbox)
     zoom = _ensure_int(os.getenv("TILE_ZOOM", "20"), 20)
     tile_size = os.getenv("TILE_SIZE", "640x640")
     tile_scale = _ensure_int(os.getenv("TILE_SCALE", "2"), 2)
+    max_workers = max(1, min(16, _ensure_int(os.getenv("MAX_WORKERS", "6"), 6)))
 
-    # paralelismo
-    max_workers = _ensure_int(os.getenv("MAX_WORKERS", "6"), 6)
-    max_workers = max(1, min(32, max_workers))
+    # debug por run/sub
+    debug_root = Path(os.getenv("DEBUG_DIR", "debug_runs")).resolve()
+    raw_dir = debug_root / run_id / sub_id / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+
+    emit({
+        "type": "sub_start",
+        "run_id": run_id,
+        "sub_id": sub_id,
+        "lat": lat, "lon": lon,
+        "raio_m": float(raio_m),
+        "max_workers": int(max_workers),
+    })
+
+    tiles = gerar_grid_coordenadas(lat, lon, float(raio_m))
+    tiles_ordered = _sort_tiles_center_out(tiles)
+
+    emit({
+        "type": "grid_ready",
+        "run_id": run_id,
+        "sub_id": sub_id,
+        "tiles_total": len(tiles_ordered),
+        "priority": "center_out",
+    })
 
     t0 = time.time()
-    logger.info("-" * 55)
-    logger.info("INICIO | sub=%s | lat=%.6f lon=%.6f | raio=%.2fm", sub_id, lat, lon, raio_m)
+    done_count = 0
+    det_emitted = 0
 
-    # Pasta debug (com subpastas)
-    debug_root = Path(os.getenv("DEBUG_DIR", "debug_imagens")).resolve()
-    raw_dir = debug_root / "raw"
-    boxed_dir = debug_root / "boxed"
-    raw_dir.mkdir(parents=True, exist_ok=True)
-    boxed_dir.mkdir(parents=True, exist_ok=True)
-    logger.info("DEBUG_DIR | %s", str(debug_root))
-
-    # [1/6] Grid
-    logger.info("[1/6] Gerando grid...")
-    tiles = gerar_grid_coordenadas(lat, lon, raio_m)
-    logger.info("[1/6] Grid pronto | tiles=%d", len(tiles))
-
-    # [2/6] Imagens + YOLO (PARALELO)
-    logger.info("[2/6] Baixando imagens e rodando YOLO (paralelo=%d workers)...", max_workers)
-
-    todas_deteccoes: List[Dict[str, Any]] = []
-    tiles_ok = 0
-    tiles_fail = 0
-    det_sem_latlon_total = 0
+    # deduper global: reduz duplicados entre tiles vizinhos
+    iou_thresh = float(os.getenv("DEDUP_IOU", "0.55"))
+    deduper = _GlobalDeduper(iou_thresh=iou_thresh)
 
     futures = []
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        for i, (t_lat, t_lon) in enumerate(tiles, 1):
-            futures.append(
-                ex.submit(
-                    _process_tile,
-                    sub_id=sub_id,
-                    i=int(i),
-                    t_lat=float(t_lat),
-                    t_lon=float(t_lon),
-                    zoom=int(zoom),
-                    tile_size=str(tile_size),
-                    tile_scale=int(tile_scale),
-                    raw_dir=raw_dir,
-                    boxed_dir=boxed_dir,
-                )
-            )
+        # Submit já em ordem de prioridade => o centro normalmente fica pronto primeiro.
+        for tile in tiles_ordered:
+            futures.append(ex.submit(
+                _process_tile_raw_and_dets,
+                sub_id=sub_id,
+                run_id=run_id,
+                tile=tile,
+                raw_dir=raw_dir,
+                zoom=zoom,
+                tile_size=tile_size,
+                tile_scale=tile_scale,
+            ))
 
         for fut in as_completed(futures):
             r = fut.result() or {}
-            if r.get("ok"):
-                tiles_ok += 1
-                dets = r.get("detections") or []
-                todas_deteccoes.extend(dets)
-                det_sem_latlon_total += int(r.get("det_sem_latlon") or 0)
+            done_count += 1
+
+            if not r.get("ok"):
+                emit({
+                    "type": "tile_fail",
+                    "run_id": run_id,
+                    "sub_id": sub_id,
+                    "row": r.get("row"), "col": r.get("col"), "tile_i": r.get("tile_i"),
+                    "error": r.get("error", "erro"),
+                })
             else:
-                tiles_fail += 1
+                # tile_ready (RAW) — front coloca no mosaico pela posição
+                emit({
+                    "type": "tile_ready",
+                    "run_id": run_id,
+                    "sub_id": sub_id,
+                    "row": r["row"], "col": r["col"], "tile_i": r["tile_i"],
+                    "raw_name": r["raw_name"],
+                    "img_w": r["img_w"], "img_h": r["img_h"],
+                })
 
-    total_paineis = len(todas_deteccoes)
-    if det_sem_latlon_total:
-        logger.warning(
-            "Aviso: %d detecções sem lat/lon vieram do YOLO; usando centro do tile (fallback).",
-            det_sem_latlon_total
-        )
-    logger.info("[2/6] YOLO ok | tiles_ok=%d tiles_fail=%d | detec_total=%d", tiles_ok, tiles_fail, total_paineis)
+                # detecções — dedup global e emite como bbox no mosaico (%)
+                dets = r.get("dets") or []
+                for d in dets:
+                    conf = float(d.get("confidence", 0.0) or 0.0)
+                    bbox_pct = _bbox_to_mosaic_pct(int(r["row"]), int(r["col"]), d, int(r["img_w"]), int(r["img_h"]))
+                    if not bbox_pct:
+                        continue
 
-    # [3/6] Landuse polygons (DATA.RIO/GeoJSON/OSM)
-    logger.info("[3/6] Consultando uso do solo (provider inteligente)...")
-    landuse_payload = get_landuse_polygons(lat, lon, raio_m)
-    poligonos = (landuse_payload or {}).get("polygons") or []
-    provider = (landuse_payload or {}).get("provider") or "UNKNOWN"
-    region = (landuse_payload or {}).get("region") or "BR"
-    logger.info("[3/6] Polígonos carregados | provider=%s region=%s total=%d", provider, region, len(poligonos))
+                    accepted, replaced = deduper.add(bbox_pct, conf)
+                    if not accepted:
+                        continue
 
-    poligonos_serializaveis = _poligonos_para_json(poligonos)
+                    det_emitted += 1
+                    emit({
+                        "type": "det_add",
+                        "run_id": run_id,
+                        "sub_id": sub_id,
+                        "det_id": None if replaced is None else replaced["id"],  # front pode remover o antigo
+                        "new_det": {
+                            "id": deduper.keep[-1]["id"] if replaced is None else None,  # id novo
+                            "bbox_pct": bbox_pct,
+                            "confidence": conf,
+                            # extras opcionais
+                            "tile_i": int(r["tile_i"]),
+                            "row": int(r["row"]),
+                            "col": int(r["col"]),
+                            "lat": d.get("lat"),
+                            "lon": d.get("lon"),
+                        },
+                        "replaced_id": replaced["id"] if replaced is not None else None,
+                    })
 
-    # [4/6] Spatial Join
-    logger.info("[4/6] Cruzando dados (IA + Mapas)...")
-    joined = spatial_join(todas_deteccoes, poligonos)
-    contagem_landuse_en = aggregate_landuse(joined)
-
-    contagem_por_tipo = {
-        "residencial": int(contagem_landuse_en.get("residential", 0)),
-        "comercial": int(contagem_landuse_en.get("commercial", 0)),
-        "industrial": int(contagem_landuse_en.get("industrial", 0)),
-    }
-
-    logger.info(
-        "[4/6] Join ok | residencial=%d comercial=%d industrial=%d (unknown=%d)",
-        contagem_por_tipo["residencial"],
-        contagem_por_tipo["comercial"],
-        contagem_por_tipo["industrial"],
-        int(contagem_landuse_en.get("unknown", 0)),
-    )
-
-    # Evidência visual (após o join)
-    if total_paineis > 0:
-        by_tile: Dict[str, List[Dict[str, Any]]] = {}
-        for det in joined:
-            raw_path = str(det.get("tile_img_raw") or "")
-            if raw_path:
-                by_tile.setdefault(raw_path, []).append(det)
-
-        annotated = 0
-        for raw_path_str, dets in by_tile.items():
-            raw_path = Path(raw_path_str)
-            out_path = Path(dets[0].get("tile_img_boxed") or (boxed_dir / (raw_path.stem + "_boxed.png")))
-            if _annotate_debug_image(raw_path, dets, out_path):
-                annotated += 1
-
-        logger.info("[4/6] Debug visual | tiles anotados=%d", annotated)
-
-    # [5/6] Impacto
-    logger.info("[5/6] Analisando MMGD/Duck Curve (com estimativas de potência e carga)...")
-    impacto = analisar_impacto_rede(contagem_por_tipo, total_paineis, joined=joined)
-    logger.info(
-        "[5/6] Impacto ok | duck=%s | mmgd=%s | gen_kw=%.1f | carga_kw=%.1f",
-        impacto.get("risco_duck_curve"),
-        impacto.get("penetracao_mmgd"),
-        float((impacto.get("estimativas") or {}).get("geracao_kw") or 0.0),
-        float((impacto.get("estimativas") or {}).get("carga_pico_kw") or 0.0),
-    )
-
-    # [6/6] Output final
-    logger.info("[6/6] Gerando JSON final...")
-    output = formatar_output(
-        id_subestacao=sub_id,
-        lat=lat,
-        lon=lon,
-        contagem_por_tipo=contagem_por_tipo,
-        impacto=impacto,
-        total_paineis=total_paineis,
-    )
+            emit({
+                "type": "progress",
+                "run_id": run_id,
+                "sub_id": sub_id,
+                "done": done_count,
+                "total": len(tiles_ordered),
+                "pct": int((done_count / max(1, len(tiles_ordered))) * 100),
+                "det_emitted": det_emitted,
+            })
 
     elapsed = time.time() - t0
-    logger.info(
-        "FIM | sub=%s | tiles_ok=%d tiles_fail=%d | detec_total=%d | tempo=%.2fs",
-        sub_id, tiles_ok, tiles_fail, total_paineis, elapsed
-    )
 
-    return {
+    result = {
         "id": sub_id,
-        "lat": float(lat),
-        "lon": float(lon),
+        "lat": lat,
+        "lon": lon,
         "raio_m": float(raio_m),
-
-        "tiles": tiles,  # tuples viram listas no json.dump (ok)
-
-        "deteccoes": todas_deteccoes,
-        "poligonos": poligonos_serializaveis,
-        "joined": joined,
-
-        "contagem_por_tipo": contagem_por_tipo,
-        "impacto": impacto,
-        "output": output,
-
-        "debug_dir": str(debug_root),
+        "run_id": run_id,
         "stats": {
-            "tiles_total": len(tiles),
-            "tiles_ok": int(tiles_ok),
-            "tiles_fail": int(tiles_fail),
-            "detec_total": int(total_paineis),
-            "det_sem_latlon": int(det_sem_latlon_total),
-            "tempo_s": round(float(elapsed), 2),
-            "poligonos_total": int(len(poligonos)),
-            "provider": provider,
-            "region": region,
-            "max_workers": int(max_workers),
-        },
+            "tiles_total": len(tiles_ordered),
+            "det_emitted": det_emitted,
+            "tempo_s": round(elapsed, 2),
+            "dedup_iou": iou_thresh,
+        }
     }
 
-
-# -----------------------------------------------------------------------------
-# API pública (compatível com chamadas antigas + novas)
-# -----------------------------------------------------------------------------
-
-def pipeline_solar_scan(*args, **kwargs) -> dict:
-    """
-    Aceita 3 jeitos de chamar (compatibilidade total):
-
-    1) pipeline_solar_scan(dados_subestacao: dict, raio_calculado: float)
-       - dados_subestacao = {"id": "...", "lat": ..., "lon": ...}
-
-    2) pipeline_solar_scan(lat: float, lon: float, raio_m: float)
-       - sub_id vira "SUB"
-
-    3) pipeline_solar_scan(sub_id: str, lat: float, lon: float, raio_m: float)
-
-    Se vier errado, lança erro com mensagem clara.
-    """
-    # kwargs (opcional)
-    if kwargs:
-        # permite: pipeline_solar_scan(sub_id="X", lat=..., lon=..., raio_m=...)
-        if {"lat", "lon", "raio_m"}.issubset(kwargs.keys()):
-            sub_id = str(kwargs.get("sub_id") or "SUB")
-            lat = _ensure_float(kwargs.get("lat"), 0.0)
-            lon = _ensure_float(kwargs.get("lon"), 0.0)
-            raio_m = _ensure_float(kwargs.get("raio_m"), float(os.getenv("RAIO_PADRAO_METROS", "500.0")))
-            return _pipeline_core(sub_id, lat, lon, raio_m)
-
-    # formato 1: (dict, raio)
-    if len(args) == 2 and isinstance(args[0], dict):
-        dados_sub = args[0]
-        raio_calc = args[1]
-        sub_id = str(dados_sub.get("id") or "SUB")
-        lat = _ensure_float(dados_sub.get("lat"), 0.0)
-        lon = _ensure_float(dados_sub.get("lon"), 0.0)
-        raio_m = _ensure_float(raio_calc, float(os.getenv("RAIO_PADRAO_METROS", "500.0")))
-        return _pipeline_core(sub_id, lat, lon, raio_m)
-
-    # formato 2: (lat, lon, raio)
-    if len(args) == 3:
-        lat = _ensure_float(args[0], 0.0)
-        lon = _ensure_float(args[1], 0.0)
-        raio_m = _ensure_float(args[2], float(os.getenv("RAIO_PADRAO_METROS", "500.0")))
-        return _pipeline_core("SUB", lat, lon, raio_m)
-
-    # formato 3: (sub_id, lat, lon, raio)
-    if len(args) == 4:
-        sub_id = str(args[0])
-        lat = _ensure_float(args[1], 0.0)
-        lon = _ensure_float(args[2], 0.0)
-        raio_m = _ensure_float(args[3], float(os.getenv("RAIO_PADRAO_METROS", "500.0")))
-        return _pipeline_core(sub_id, lat, lon, raio_m)
-
-    raise TypeError(
-        "Uso correto:\n"
-        "  pipeline_solar_scan(dados_subestacao_dict, raio_calculado)\n"
-        "  pipeline_solar_scan(lat, lon, raio_m)\n"
-        "  pipeline_solar_scan(sub_id, lat, lon, raio_m)\n"
-    )
+    emit({"type": "done", "run_id": run_id, "sub_id": sub_id, "result": result})
+    return result
