@@ -1,6 +1,0 @@
-# Dependências do SolarScan
-requests==2.31.0
-numpy==1.26.0
-scikit-learn==1.3.0
-shapely==2.0.1
-ultralytics==8.0.0

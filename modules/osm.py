@@ -1,5 +1,5 @@
+# modules/osm.py
 """
-MÓDULO 5 — osm.py
 Contextualização territorial via OpenStreetMap (OSM)
 
 Saída (compatível com spatial_join.py):
@@ -8,12 +8,10 @@ Saída (compatível com spatial_join.py):
   ...
 ]
 
-Estratégia:
-1) Busca landuse=* (ways/relations) e NORMALIZA p/ {residential, commercial, industrial, unknown}
-2) Se res+com+ind for baixo, roda FALLBACK gratuito via OSM:
-   - building=* (ways/relations -> polígonos)
-   - POIs (nodes) shop/office/amenity/industrial/power/man_made=works -> buffer -> polígonos
-3) (Por padrão) faz MERGE: landuse normalizado + fallback para cobrir lacunas.
+Upgrades:
+- Consulta mais sinais além de landuse:
+  building:use, usage, craft, service, tourism, leisure, shop, office, amenity, industrial, power, man_made
+- Normalização mais agressiva para reduzir unknown (com heurísticas conservadoras)
 """
 
 from __future__ import annotations
@@ -33,23 +31,14 @@ from shapely.affinity import scale
 
 
 # --------------------------------------------------------------------------- #
-# Tuning fácil
+# Tuning
 # --------------------------------------------------------------------------- #
 
-# Se após normalizar o landuse, a soma (res+com+ind) for menor que isso,
-# ativa fallback buildings/POIs.
 MIN_CLASSIFIED_POLYGONS = 10
-
-# Buffer (metros) para POIs (nodes) virarem polígonos.
+UNKNOWN_RATIO_THRESHOLD = 0.70
 POI_BUFFER_M = 25.0
-
-# Se True: combina (landuse normalizado) + (fallback) ao invés de substituir
 MERGE_FALLBACK = True
 
-
-# --------------------------------------------------------------------------- #
-# Logger
-# --------------------------------------------------------------------------- #
 
 logger = logging.getLogger("solarscan.osm")
 if not logger.handlers:
@@ -59,10 +48,6 @@ if not logger.handlers:
     logger.addHandler(handler)
     logger.propagate = False
 
-
-# --------------------------------------------------------------------------- #
-# Overpass endpoints (fallback)
-# --------------------------------------------------------------------------- #
 
 _overpass_env = "https://overpass.kumi.systems/api/interpreter"
 
@@ -75,10 +60,6 @@ OVERPASS_ENDPOINTS: List[str] = [
 OVERPASS_ENDPOINTS = [u for u in OVERPASS_ENDPOINTS if u]
 
 
-# --------------------------------------------------------------------------- #
-# Query builders
-# --------------------------------------------------------------------------- #
-
 def _build_overpass_query_landuse(lat: float, lon: float, raio_m: float) -> str:
     r = int(max(1.0, float(raio_m)))
     return f"""
@@ -90,6 +71,7 @@ def _build_overpass_query_landuse(lat: float, lon: float, raio_m: float) -> str:
     out geom;
     """
 
+
 def _build_overpass_query_fallback(lat: float, lon: float, raio_m: float) -> str:
     r = int(max(1.0, float(raio_m)))
     return f"""
@@ -98,12 +80,47 @@ def _build_overpass_query_fallback(lat: float, lon: float, raio_m: float) -> str
       way["building"](around:{r},{lat},{lon});
       relation["building"](around:{r},{lat},{lon});
 
+      way["building:use"](around:{r},{lat},{lon});
+      relation["building:use"](around:{r},{lat},{lon});
+
+      way["usage"](around:{r},{lat},{lon});
+      relation["usage"](around:{r},{lat},{lon});
+
       node["shop"](around:{r},{lat},{lon});
+      way["shop"](around:{r},{lat},{lon});
+      relation["shop"](around:{r},{lat},{lon});
+
       node["office"](around:{r},{lat},{lon});
+      way["office"](around:{r},{lat},{lon});
+      relation["office"](around:{r},{lat},{lon});
+
       node["amenity"](around:{r},{lat},{lon});
+      way["amenity"](around:{r},{lat},{lon});
+      relation["amenity"](around:{r},{lat},{lon});
+
+      node["craft"](around:{r},{lat},{lon});
+      way["craft"](around:{r},{lat},{lon});
+      relation["craft"](around:{r},{lat},{lon});
+
+      node["service"](around:{r},{lat},{lon});
+      way["service"](around:{r},{lat},{lon});
+      relation["service"](around:{r},{lat},{lon});
+
+      node["tourism"](around:{r},{lat},{lon});
+      way["tourism"](around:{r},{lat},{lon});
+      relation["tourism"](around:{r},{lat},{lon});
+
+      node["leisure"](around:{r},{lat},{lon});
+      way["leisure"](around:{r},{lat},{lon});
+      relation["leisure"](around:{r},{lat},{lon});
 
       node["industrial"](around:{r},{lat},{lon});
+      way["industrial"](around:{r},{lat},{lon});
+      relation["industrial"](around:{r},{lat},{lon});
+
       node["man_made"="works"](around:{r},{lat},{lon});
+      way["man_made"="works"](around:{r},{lat},{lon});
+      relation["man_made"="works"](around:{r},{lat},{lon});
 
       node["power"](around:{r},{lat},{lon});
       way["power"](around:{r},{lat},{lon});
@@ -112,10 +129,6 @@ def _build_overpass_query_fallback(lat: float, lon: float, raio_m: float) -> str
     out geom;
     """
 
-
-# --------------------------------------------------------------------------- #
-# Overpass request
-# --------------------------------------------------------------------------- #
 
 def _post_overpass(query: str) -> Dict[str, Any]:
     last_err: Optional[Exception] = None
@@ -139,12 +152,10 @@ def _post_overpass(query: str) -> Dict[str, Any]:
                 last_err = e
                 logger.warning("OSM | SSL falhou no endpoint=%s | %s", url, str(e))
                 break
-
             except ValueError as e:
                 last_err = e
                 logger.warning("OSM | JSON inválido endpoint=%s | %s", url, str(e))
                 time.sleep(0.5 * attempt)
-
             except RequestException as e:
                 last_err = e
                 logger.warning("OSM | request falhou endpoint=%s | %s", url, str(e))
@@ -152,10 +163,6 @@ def _post_overpass(query: str) -> Dict[str, Any]:
 
     raise RuntimeError(f"Overpass API error: {last_err}")
 
-
-# --------------------------------------------------------------------------- #
-# Geometria helpers
-# --------------------------------------------------------------------------- #
 
 def _coords_from_geometry(geom_list: Any) -> Optional[List[Tuple[float, float]]]:
     if not isinstance(geom_list, list) or len(geom_list) < 3:
@@ -169,17 +176,14 @@ def _coords_from_geometry(geom_list: Any) -> Optional[List[Tuple[float, float]]]
 
     if len(coords) < 3:
         return None
-
     if coords[0] != coords[-1]:
         coords.append(coords[0])
-
     if len(coords) < 4:
         return None
-
     return coords
 
 
-def _safe_make_polygon(coords: List[Tuple[float, float]]) -> Optional[Any]:
+def _safe_make_polygon(coords: List[Tuple[float, float]]):
     try:
         poly = Polygon(coords)
         if poly.is_empty:
@@ -193,7 +197,7 @@ def _safe_make_polygon(coords: List[Tuple[float, float]]) -> Optional[Any]:
         return None
 
 
-def _buffer_node_as_polygon(lat: float, lon: float, radius_m: float) -> Optional[Any]:
+def _buffer_node_as_polygon(lat: float, lon: float, radius_m: float):
     try:
         dlat = float(radius_m) / 111_320.0
         dlon = float(radius_m) / (111_320.0 * max(1e-6, math.cos(math.radians(float(lat)))))
@@ -210,11 +214,6 @@ def _buffer_node_as_polygon(lat: float, lon: float, radius_m: float) -> Optional
         return None
 
 
-# --------------------------------------------------------------------------- #
-# Normalização (chave do seu problema)
-# --------------------------------------------------------------------------- #
-
-# landuse=* -> classes alvo do seu join
 _LANDUSE_TO_CLASS = {
     "residential": "residential",
     "house": "residential",
@@ -223,7 +222,7 @@ _LANDUSE_TO_CLASS = {
     "retail": "commercial",
 
     "industrial": "industrial",
-    "construction": "industrial",   # opcional: pode deixar "unknown" se preferir conservador
+    "construction": "industrial",
     "brownfield": "industrial",
     "quarry": "industrial",
 }
@@ -231,13 +230,16 @@ _LANDUSE_TO_CLASS = {
 _RES_BUILDINGS = {
     "house", "apartments", "residential", "terrace", "semidetached_house",
     "bungalow", "detached", "dormitory",
+    "garage", "garages", "shed", "hut",
 }
-_COM_BUILDINGS = {
-    "commercial", "retail", "office", "supermarket", "kiosk",
-}
-_IND_BUILDINGS = {
-    "industrial", "warehouse", "factory", "manufacture",
-}
+_COM_BUILDINGS = {"commercial", "retail", "office", "supermarket", "kiosk"}
+_IND_BUILDINGS = {"industrial", "warehouse", "factory", "manufacture"}
+
+_COM_USAGE = {"commercial", "retail", "office", "services", "service"}
+_IND_USAGE = {"industrial", "warehouse", "logistics", "manufacturing"}
+_RES_USAGE = {"residential", "apartments", "house", "housing"}
+
+_AMENITY_EXCEPT_UNKNOWN = {"grave_yard", "cemetery", "shelter"}
 
 
 def _normalize_from_tags(tags: Dict[str, Any]) -> str:
@@ -248,12 +250,10 @@ def _normalize_from_tags(tags: Dict[str, Any]) -> str:
         except Exception:
             continue
 
-    # 1) Se tem landuse, prioriza (é o mais “territorial”)
     lu = (t.get("landuse") or "").strip().lower()
     if lu:
         return _LANDUSE_TO_CLASS.get(lu, "unknown")
 
-    # 2) Infra/industrial forte (subestação etc)
     p = (t.get("power") or "").strip().lower()
     if p in {"substation", "plant", "generator"}:
         return "industrial"
@@ -262,7 +262,22 @@ def _normalize_from_tags(tags: Dict[str, Any]) -> str:
     if "industrial" in t:
         return "industrial"
 
-    # 3) building=*
+    bu = (t.get("building:use") or "").strip().lower()
+    if bu in _IND_USAGE:
+        return "industrial"
+    if bu in _COM_USAGE:
+        return "commercial"
+    if bu in _RES_USAGE:
+        return "residential"
+
+    us = (t.get("usage") or "").strip().lower()
+    if us in _IND_USAGE:
+        return "industrial"
+    if us in _COM_USAGE:
+        return "commercial"
+    if us in _RES_USAGE:
+        return "residential"
+
     b = (t.get("building") or "").strip().lower()
     if b in _IND_BUILDINGS:
         return "industrial"
@@ -271,11 +286,22 @@ def _normalize_from_tags(tags: Dict[str, Any]) -> str:
     if b in _RES_BUILDINGS:
         return "residential"
 
-    # 4) POIs
-    if "shop" in t or "office" in t:
+    if any(k in t for k in ("craft", "service", "shop", "office", "tourism", "leisure")):
         return "commercial"
+
     if "amenity" in t:
+        a = (t.get("amenity") or "").strip().lower()
+        if a and a in _AMENITY_EXCEPT_UNKNOWN:
+            return "unknown"
         return "commercial"
+
+    if b in {"yes", "building"}:
+        if any(k.startswith("addr:") for k in t.keys()):
+            return "residential"
+        return "residential"
+
+    if any(v.strip().lower() in {"warehouse", "construction"} for v in t.values()):
+        return "industrial"
 
     return "unknown"
 
@@ -290,24 +316,15 @@ def _count_classes(polygons: List[Dict[str, Any]]) -> Dict[str, int]:
     return c
 
 
-# --------------------------------------------------------------------------- #
-# Parsers
-# --------------------------------------------------------------------------- #
-
 def parse_polygons_landuse(data: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """
-    Extrai polígonos de landuse=* e NORMALIZA para res/com/ind/unknown
-    """
     elements = (data or {}).get("elements", [])
     if not isinstance(elements, list):
         return []
 
     polygons: List[Dict[str, Any]] = []
-
     for el in elements:
         if not isinstance(el, dict):
             continue
-
         tags = el.get("tags") or {}
         if not isinstance(tags, dict):
             tags = {}
@@ -327,15 +344,11 @@ def parse_polygons_landuse(data: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def parse_polygons_fallback(data: Dict[str, Any], poi_buffer_m: float = POI_BUFFER_M) -> List[Dict[str, Any]]:
-    """
-    Fallback: buildings + POIs -> NORMALIZA p/ res/com/ind/unknown
-    """
     elements = (data or {}).get("elements", [])
     if not isinstance(elements, list):
         return []
 
     polygons: List[Dict[str, Any]] = []
-
     for el in elements:
         if not isinstance(el, dict):
             continue
@@ -346,7 +359,6 @@ def parse_polygons_fallback(data: Dict[str, Any], poi_buffer_m: float = POI_BUFF
 
         cls = _normalize_from_tags(tags)
 
-        # ways/relations -> polygon
         coords = _coords_from_geometry(el.get("geometry"))
         if coords:
             poly = _safe_make_polygon(coords)
@@ -354,7 +366,6 @@ def parse_polygons_fallback(data: Dict[str, Any], poi_buffer_m: float = POI_BUFF
                 polygons.append({"geometry": poly, "landuse": cls})
                 continue
 
-        # nodes -> buffer polygon
         if el.get("type") == "node" and "lat" in el and "lon" in el:
             poly = _buffer_node_as_polygon(float(el["lat"]), float(el["lon"]), float(poi_buffer_m))
             if poly is not None:
@@ -363,52 +374,38 @@ def parse_polygons_fallback(data: Dict[str, Any], poi_buffer_m: float = POI_BUFF
     return polygons
 
 
-# --------------------------------------------------------------------------- #
-# Public API
-# --------------------------------------------------------------------------- #
-
 def obter_poligonos_osm(lat: float, lon: float, raio_m: float) -> Dict[str, Any]:
-    """
-    - sucesso -> {"polygons": [...], "success": True}
-    - falha   -> {"polygons": [], "success": False, "error": "..."}
-    """
     logger.info("OSM | consulta iniciada (raio=%.0fm)", float(raio_m))
 
     try:
-        # 1) landuse normalizado
         data = _post_overpass(_build_overpass_query_landuse(lat, lon, raio_m))
         polygons = parse_polygons_landuse(data)
 
         counts = _count_classes(polygons)
         classified = counts["residential"] + counts["commercial"] + counts["industrial"]
+        total = int(len(polygons))
+        unknown_ratio = (float(counts.get("unknown", 0)) / float(total)) if total else 1.0
+
         logger.info(
             "OSM | landuse normalizado | total=%d | res=%d com=%d ind=%d unk=%d",
             len(polygons), counts["residential"], counts["commercial"], counts["industrial"], counts["unknown"]
         )
+        logger.info("OSM | unknown_ratio=%.2f", unknown_ratio)
 
-        # 2) fallback se classe útil ficou baixa
-        if classified < MIN_CLASSIFIED_POLYGONS:
-            logger.info(
-                "OSM | classes úteis baixas (%d < %d) -> fallback buildings/POIs",
-                classified, MIN_CLASSIFIED_POLYGONS
-            )
+        need_fallback = (classified < MIN_CLASSIFIED_POLYGONS) or (unknown_ratio >= UNKNOWN_RATIO_THRESHOLD)
+        if need_fallback:
+            reason = []
+            if classified < MIN_CLASSIFIED_POLYGONS:
+                reason.append(f"classes úteis baixas ({classified} < {MIN_CLASSIFIED_POLYGONS})")
+            if unknown_ratio >= UNKNOWN_RATIO_THRESHOLD:
+                reason.append(f"unknown alto ({unknown_ratio:.0%} >= {UNKNOWN_RATIO_THRESHOLD:.0%})")
+
+            logger.info("OSM | ativando fallback buildings/POIs | %s", " + ".join(reason))
             data_fb = _post_overpass(_build_overpass_query_fallback(lat, lon, raio_m))
             fb_polys = parse_polygons_fallback(data_fb, poi_buffer_m=POI_BUFFER_M)
 
-            fb_counts = _count_classes(fb_polys)
-            fb_classified = fb_counts["residential"] + fb_counts["commercial"] + fb_counts["industrial"]
-            logger.info(
-                "OSM | fallback ok | total=%d | res=%d com=%d ind=%d unk=%d",
-                len(fb_polys), fb_counts["residential"], fb_counts["commercial"], fb_counts["industrial"], fb_counts["unknown"]
-            )
-
             if MERGE_FALLBACK:
                 polygons = polygons + fb_polys
-                merged = _count_classes(polygons)
-                logger.info(
-                    "OSM | merge final | total=%d | res=%d com=%d ind=%d unk=%d",
-                    len(polygons), merged["residential"], merged["commercial"], merged["industrial"], merged["unknown"]
-                )
             else:
                 polygons = fb_polys
 

@@ -11,7 +11,7 @@ from modules.geo_calculos import gerar_grid_coordenadas, anexar_latlon_da_bbox
 from yolo import detectar_paineis_imagem, salvar_imagem_com_boxes
 
 # OSM + join + análise + output
-from modules.osm import obter_poligonos_osm
+from modules.landuse_provider import get_landuse_polygons
 from modules.spatial_join import spatial_join, aggregate_landuse
 from modules.analise import analisar_impacto_rede
 from modules.saida import formatar_output
@@ -180,12 +180,19 @@ def pipeline_solar_scan(dados_subestacao: dict, raio_calculado: float) -> dict:
             det_sem_latlon
         )
 
-    # [3/6] OSM
-    logger.info("[3/6] Obtendo contexto urbano (OSM)...")
-    poligonos_resp = obter_poligonos_osm(lat, lon, raio_m)
+    # [3/6] Landuse (DATA.RIO -> fallback OSM)
+    logger.info("[3/6] Obtendo contexto territorial (DATA.RIO/OSM)...")
+    poligonos_resp = get_landuse_polygons(
+        lat,
+        lon,
+        raio_m,
+        region_hint=os.getenv("REGION_HINT"),
+        rio_geojson_path=os.getenv("RIO_USO_SOLO_GEOJSON"),
+    )
     poligonos = (poligonos_resp or {}).get("polygons", []) or []
     poligonos_serializaveis = _poligonos_para_json(poligonos)
-    logger.info("[3/6] OSM ok | poligonos=%d", len(poligonos))
+    provider = (poligonos_resp or {}).get("provider", "unknown")
+    logger.info("[3/6] Landuse ok | provider=%s | poligonos=%d", provider, len(poligonos))
 
     # [4/6] Spatial Join
     logger.info("[4/6] Cruzando dados (IA + Mapas)...")

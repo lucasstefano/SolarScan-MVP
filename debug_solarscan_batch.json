@@ -43,7 +43,7 @@
     "det_sem_latlon": null,
     "contagem_por_tipo": {
       "residencial": 0,
-      "comercial": 0,
+      "comercial": 3,
       "industrial": 0
     },
     "impacto": {
@@ -52,7 +52,7 @@
       "percentuais": {
         "residencial": 0.0,
         "industrial": 0.0,
-        "comercial": 0.0
+        "comercial": 100.0
       },
       "recomendacoes": [
         "Monitorar fluxo reverso no período solar",
@@ -104,16 +104,16 @@
     "det_sem_latlon": null,
     "contagem_por_tipo": {
       "residencial": 36,
-      "comercial": 0,
-      "industrial": 0
+      "comercial": 1,
+      "industrial": 1
     },
     "impacto": {
       "risco_duck_curve": "ALTO",
       "penetracao_mmgd": "BAIXA",
       "percentuais": {
-        "residencial": 100.0,
-        "industrial": 0.0,
-        "comercial": 0.0
+        "residencial": 94.7,
+        "industrial": 2.6,
+        "comercial": 2.6
       },
       "recomendacoes": [
         "Monitorar fluxo reverso no período solar",
@@ -164,7 +164,7 @@
     "deteccoes_total": null,
     "det_sem_latlon": null,
     "contagem_por_tipo": {
-      "residencial": 1,
+      "residencial": 26,
       "comercial": 0,
       "industrial": 0
     },

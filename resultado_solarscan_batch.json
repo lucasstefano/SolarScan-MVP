@@ -3,14 +3,14 @@
     "id_subestacao": "SUB_BTF_CENTRO",
     "latitude_sub": -22.994598,
     "longitude_sub": -43.377366,
-    "perfil_predominante": "RESIDENCIAL",
+    "perfil_predominante": "COMERCIAL",
     "%_residencial": 0.0,
     "%_industrial": 0.0,
-    "%_comercial": 0.0,
+    "%_comercial": 100.0,
     "qnt_aprox_placa": 3,
     "penetracao_mmgd": "BAIXA",
     "risco_duck_curve": "BAIXO",
-    "timestamp_processamento": "2026-02-03T00:19:54.773107Z",
+    "timestamp_processamento": "2026-02-04T20:25:36.383844Z",
     "versao_pipeline": "1.0.0-mvp"
   },
   {
@@ -18,13 +18,13 @@
     "latitude_sub": -22.999391,
     "longitude_sub": -43.431344,
     "perfil_predominante": "RESIDENCIAL",
-    "%_residencial": 100.0,
-    "%_industrial": 0.0,
-    "%_comercial": 0.0,
+    "%_residencial": 94.7,
+    "%_industrial": 2.6,
+    "%_comercial": 2.6,
     "qnt_aprox_placa": 39,
     "penetracao_mmgd": "BAIXA",
     "risco_duck_curve": "ALTO",
-    "timestamp_processamento": "2026-02-03T00:21:05.456209Z",
+    "timestamp_processamento": "2026-02-04T20:26:23.349402Z",
     "versao_pipeline": "1.0.0-mvp"
   },
   {
@@ -38,7 +38,7 @@
     "qnt_aprox_placa": 26,
     "penetracao_mmgd": "BAIXA",
     "risco_duck_curve": "ALTO",
-    "timestamp_processamento": "2026-02-03T00:21:38.802689Z",
+    "timestamp_processamento": "2026-02-04T20:27:04.465230Z",
     "versao_pipeline": "1.0.0-mvp"
   }
 ]
