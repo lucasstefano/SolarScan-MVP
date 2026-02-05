@@ -1,6 +1,12 @@
 import numpy as np
 import math
+from typing import Any, Optional, Tuple, List, Dict
 from sklearn.neighbors import NearestNeighbors
+
+# --- OTIMIZAÇÃO: Usando STRtree em vez de unary_union ---
+from shapely.geometry import box
+from shapely.strtree import STRtree 
+# --------------------------------------------------------
 
 from config import (
     RAIO_MINIMO_METROS, 
@@ -8,98 +14,164 @@ from config import (
     RAIO_PADRAO_METROS,
     RAIO_TERRA_METROS
 )
-# Módulo para cálculos geoespaciais avançados
-def calcular_raios_dinamicos(lista_subestacoes: list) -> dict:
 
+# -----------------------------------------------------------------------------
+# Constantes Web Mercator
+# -----------------------------------------------------------------------------
+METERS_PER_DEGREE_LAT = 111139.0
+_R_WEBMERCATOR = 6378137.0
+_EQ_CIRCUMFERENCE = 2 * math.pi * _R_WEBMERCATOR  # ~40.075 km
+
+def get_meters_per_pixel(lat: float, zoom: int) -> float:
+    """Calcula resolução (metros reais no chão por pixel) para analise de área."""
+    # Proteção de segurança contra polos
+    lat = max(-85.05, min(85.05, lat))
+    
+    lat_rad = math.radians(lat)
+    cos_lat = math.cos(lat_rad)
+    if abs(cos_lat) < 1e-6: cos_lat = 1e-6
+    world_pixels = 256.0 * (2.0 ** zoom)
+    return (_EQ_CIRCUMFERENCE * cos_lat) / world_pixels
+
+def meters_per_pixel_webmercator(lat: float, zoom: int) -> float:
+    return get_meters_per_pixel(lat, zoom)
+
+# -----------------------------------------------------------------------------
+# 1. Lógica de Raios (KNN)
+# -----------------------------------------------------------------------------
+def calcular_raios_dinamicos(lista_subestacoes: list) -> dict:
     qtd = len(lista_subestacoes)
     resultado_raios = {}
     
-    # CASO 1: Apenas 1 subestação (Sem vizinhos para comparar)
     if qtd < 2:
-        print(" Apenas 1 subestação detectada. Usando raio padrão.")
+        print("⚠ Apenas 1 subestação detectada. Usando raio padrão.")
         for sub in lista_subestacoes:
-            resultado_raios[sub["id"]] = RAIO_PADRAO_METROS
+            resultado_raios[sub["id"]] = float(sub.get("raio_m", RAIO_PADRAO_METROS))
         return resultado_raios
 
-    # CASO 2: Múltiplas subestações (Cálculo Vetorial)
-    print(f"Calculando densidade para {qtd} pontos...")
-
-    # Extrair coordenadas e converter para Radianos (exigência do sklearn haversine)
-    # Formato da matriz: [[lat_rad, lon_rad], [lat_rad, lon_rad], ...]
+    print(f"📐 Calculando densidade (KNN) para {qtd} pontos...")
     coords_deg = np.array([[s['lat'], s['lon']] for s in lista_subestacoes])
     coords_rad = np.radians(coords_deg)
 
-    # Configurar Modelo Nearest Neighbors
-    # n_neighbors=2 porque o vizinho 1 é o próprio ponto (distância 0)
-    vizinhos_proximos = NearestNeighbors(n_neighbors=2, algorithm='ball_tree', metric='haversine')
-    vizinhos_proximos.fit(coords_rad)
-    
-    # Encontrar distâncias (retorna em radianos)
-    distances_rad, indices = vizinhos_proximos.kneighbors(coords_rad)
-    
-    # O array distances_rad tem shape (N, 2). A coluna 0 é o próprio ponto, coluna 1 é o vizinho.
-    vizinho_dist_rad = distances_rad[:, 1]
-    
-    # Converter radianos para metros
-    vizinho_dist_metros = vizinho_dist_rad * RAIO_TERRA_METROS
+    nbrs = NearestNeighbors(n_neighbors=2, algorithm='ball_tree', metric='haversine')
+    nbrs.fit(coords_rad)
+    distances_rad, _ = nbrs.kneighbors(coords_rad)
+    dist_metros = distances_rad[:, 1] * RAIO_TERRA_METROS
 
-    # Iterar e aplicar regras de negócio (Travas)
     for i, sub in enumerate(lista_subestacoes):
-        dist_vizinho = vizinho_dist_metros[i]
-        
-        # Raio Calculado: Metade da distância ao vizinho mais próximo
-        raio_calculado = dist_vizinho / 2.0
-        
-        # Aplicação das Travas (Clamping)
-        if raio_calculado < RAIO_MINIMO_METROS:
-            raio_final = RAIO_MINIMO_METROS
-        elif raio_calculado > RAIO_MAXIMO_METROS:
-            raio_final = RAIO_MAXIMO_METROS
-        else:
-            raio_final = raio_calculado
-            
+        raio_calc = dist_metros[i] / 2.0
+        raio_final = max(RAIO_MINIMO_METROS, min(raio_calc, RAIO_MAXIMO_METROS))
         resultado_raios[sub["id"]] = round(raio_final, 2)
 
     return resultado_raios
 
-# Função para gerar uma grade de coordenadas cobrindo um círculo
-def gerar_grid_coordenadas(lat: float, long: float, raio: float) -> list:
+# -----------------------------------------------------------------------------
+# 2. Geração de Grid (PIXEL PERFECT / ORDENADO NORTE -> SUL)
+# -----------------------------------------------------------------------------
+def _latlon_to_world_meters(lat: float, lon: float) -> Tuple[float, float]:
+    """Converte Lat/Lon para Metros Projetados (EPSG:3857)."""
+    lat = max(-85.05, min(85.05, lat)) # Clip de segurança
+    mx = lon * _R_WEBMERCATOR * (math.pi / 180.0)
+    my = math.log(math.tan((90 + lat) * math.pi / 360.0)) * _R_WEBMERCATOR
+    return mx, my
 
-    # Converter metros para graus (aproximação na latitude)
-    meters_per_degree = 111139.0   
-    delta_lat = raio / meters_per_degree
+def _world_meters_to_latlon(mx: float, my: float) -> Tuple[float, float]:
+    """Converte Metros Projetados (EPSG:3857) para Lat/Lon."""
+    lon = (mx / _R_WEBMERCATOR) * (180.0 / math.pi)
+    lat = (math.atan(math.exp(my / _R_WEBMERCATOR)) * 360.0 / math.pi) - 90.0
+    return lat, lon
 
-    # Correção da longitude baseada na latitude (cos)
-    cos_lat = math.cos(math.radians(lat))
-    if abs(cos_lat) < 1e-12:
-        cos_lat = 1e-12
-
-    delta_lon = raio / (meters_per_degree * cos_lat)
+def gerar_grid_coordenadas(lat: float, lon: float, raio: float, zoom: int = 20) -> List[Tuple[float, float]]:
+    """
+    Gera coordenadas centrais para tiles de 640x640px.
+    Ordem: Cima para Baixo (Norte -> Sul), Esquerda para Direita (Oeste -> Leste).
+    """
+    IMG_SIZE_PX = 640.0
     
-    # Grid 3x3 simples cobrindo o ROI
+    # 1. Resolução PROJETADA
+    resolution = _EQ_CIRCUMFERENCE / (256.0 * (2.0 ** zoom))
+    tile_size_proj_m = IMG_SIZE_PX * resolution
+    
+    # 2. Converter centro da subestação
+    center_mx, center_my = _latlon_to_world_meters(lat, lon)
+    
+    # 3. Calcular quantas tiles (Grid simétrico)
+    scale_factor = 1.0 / math.cos(math.radians(max(-85, min(85, lat))))
+    raio_proj = raio * scale_factor
+    num_tiles_half = math.ceil(raio_proj / tile_size_proj_m)
+    
+    # 4. Gerar Grid Ordenado
     grade = []
     
-    # Passo de varredura (step) - define sobreposição
-    step_lat = delta_lat * 0.5
-    step_lon = delta_lon * 0.5
-    
-    # Loop simples ao redor do centro
-    for i in range(-1, 2):
-        for j in range(-1, 2):
-            lat_nova = lat + (i * step_lat)
-            long_nova = long + (j * step_lon)
-            grade.append((lat_nova, long_nova))
+    # Loop Norte -> Sul (Decrescente)
+    for i in range(num_tiles_half, -num_tiles_half - 1, -1):
+        for j in range(-num_tiles_half, num_tiles_half + 1):  # Oeste -> Leste
+            
+            # Calcula centro em metros projetados
+            new_mx = center_mx + (j * tile_size_proj_m)
+            new_my = center_my + (i * tile_size_proj_m) 
+            
+            n_lat, n_lon = _world_meters_to_latlon(new_mx, new_my)
+            grade.append((n_lat, n_lon))
+            
     return grade
 
-import math
-from typing import Any, Optional, Tuple
+# -----------------------------------------------------------------------------
+# 3. Lógica Smart Scan (Filtro por Máscara OTIMIZADO COM R-TREE)
+# -----------------------------------------------------------------------------
+def filtrar_grid_com_mascara(
+    grid: List[Tuple[float, float]], 
+    poligonos_mask: List[Dict[str, Any]], 
+    lat_centro: float,
+    zoom: int = 19
+) -> List[Tuple[float, float]]:
+    """
+    Recebe o grid completo e remove tiles que não interceptam nenhuma edificação.
+    Usa Índice Espacial (STRtree) para performance O(log N).
+    """
+    if not poligonos_mask:
+        return grid 
 
-_R_WEBMERCATOR = 6378137.0  # metros
+    # 1. Extrair geometrias válidas
+    geoms = [p["geometry"] for p in poligonos_mask if "geometry" in p and p["geometry"].is_valid]
+    
+    if not geoms:
+        return grid
 
-def _meters_per_pixel_webmercator(lat: float, zoom: int) -> float:
-    return (math.cos(math.radians(lat)) * 2.0 * math.pi * _R_WEBMERCATOR) / (256.0 * (2.0 ** zoom))
+    # 2. Criar Índice Espacial (R-Tree)
+    # Isso é MUITO mais rápido que 'unary_union'
+    tree = STRtree(geoms)
 
+    # 3. Calcular box da Tile em Graus
+    IMG_SIZE_PX = 640.0
+    resolution = _EQ_CIRCUMFERENCE / (256.0 * (2.0 ** zoom))
+    tile_size_m = IMG_SIZE_PX * resolution
+    
+    delta_lat = tile_size_m / METERS_PER_DEGREE_LAT
+    cos_lat = math.cos(math.radians(max(-85, min(85, lat_centro))))
+    if abs(cos_lat) < 1e-6: cos_lat = 1e-6
+    delta_lon = tile_size_m / (METERS_PER_DEGREE_LAT * cos_lat)
+
+    # Margem de segurança (10%)
+    half_lat = (delta_lat * 1.1) / 2.0
+    half_lon = (delta_lon * 1.1) / 2.0
+
+    grid_filtrado = []
+    for lat, lon in grid:
+        tile_box = box(lon - half_lon, lat - half_lat, lon + half_lon, lat + half_lat)
+        
+        # 4. Busca Otimizada: A árvore diz se intercepta algo
+        indices = tree.query(tile_box)
+        if len(indices) > 0:
+            grid_filtrado.append((lat, lon))
+
+    return grid_filtrado
+
+# -----------------------------------------------------------------------------
+# 4. Helpers de Conversão (LatLon <-> Pixel)
+# -----------------------------------------------------------------------------
 def _mercator_from_latlon(lat: float, lon: float) -> Tuple[float, float]:
+    lat = max(-85.05, min(85.05, lat))
     x = _R_WEBMERCATOR * math.radians(lon)
     y = _R_WEBMERCATOR * math.log(math.tan(math.pi / 4.0 + math.radians(lat) / 2.0))
     return x, y
@@ -110,57 +182,26 @@ def _latlon_from_mercator(x: float, y: float) -> Tuple[float, float]:
     return lat, lon
 
 def _bbox_center_px(det: Any) -> Optional[Tuple[float, float]]:
-    if not isinstance(det, dict):
-        return None
-
-    # formatos comuns com 4 valores
+    if not isinstance(det, dict): return None
+    if all(k in det for k in ("x", "y", "width", "height")):
+        return det["x"] + (det["width"]/2), det["y"] + (det["height"]/2)
     for k in ("bbox", "xyxy", "box"):
         v = det.get(k)
         if isinstance(v, (list, tuple)) and len(v) == 4:
-            x1, y1, x2, y2 = map(float, v)
-            return (x1 + x2) / 2.0, (y1 + y2) / 2.0
-
-    # formato centro + tamanho
-    v = det.get("xywh")
-    if isinstance(v, (list, tuple)) and len(v) == 4:
-        cx, cy, _, _ = map(float, v)
-        return cx, cy
-
-    # formato com chaves explícitas
-    if all(k in det for k in ("x1", "y1", "x2", "y2")):
-        x1 = float(det["x1"]); y1 = float(det["y1"])
-        x2 = float(det["x2"]); y2 = float(det["y2"])
-        return (x1 + x2) / 2.0, (y1 + y2) / 2.0
-
-    # ✅ formato do seu YOLO (x, y, width, height) onde (x,y) é canto superior esquerdo
-    if all(k in det for k in ("x", "y", "width", "height")):
-        x = float(det["x"]); y = float(det["y"])
-        w = float(det["width"]); h = float(det["height"])
-        return x + (w / 2.0), y + (h / 2.0)
-
+            return (v[0] + v[2])/2, (v[1] + v[3])/2
     return None
 
-def anexar_latlon_da_bbox(
-    det: dict,
-    tile_lat: float,
-    tile_lon: float,
-    zoom: int,
-    img_w: int,
-    img_h: int,
-) -> bool:
+def anexar_latlon_da_bbox(det: dict, tile_lat: float, tile_lon: float, zoom: int, img_w: int, img_h: int) -> bool:
     c = _bbox_center_px(det)
-    if c is None:
-        return False
+    if c is None: return False
 
     cx, cy = c
-    mpp = _meters_per_pixel_webmercator(tile_lat, zoom)
+    mpp = get_meters_per_pixel(tile_lat, zoom)
 
     dx = (cx - (img_w / 2.0)) * mpp
     dy = (cy - (img_h / 2.0)) * mpp
 
     x0, y0 = _mercator_from_latlon(tile_lat, tile_lon)
-
-    # y na imagem cresce pra baixo; no Mercator cresce pra cima
     lat, lon = _latlon_from_mercator(x0 + dx, y0 - dy)
 
     det["lat"] = float(lat)

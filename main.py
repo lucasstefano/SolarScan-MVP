@@ -1,15 +1,50 @@
 import json
 import time
+import os
+from dotenv import load_dotenv # Adicione esta linha
+import shutil
+# Garante que variáveis de ambiente estejam carregadas antes de qualquer import de módulo
+load_dotenv() 
+
 from modules.entrada import receber_requisicao
 from modules.geo_calculos import calcular_raios_dinamicos
 from pipeline import pipeline_solar_scan
 
+from pathlib import Path
 
+def limpar_debug_anterior():
+    """
+    Remove a pasta de debug antiga para evitar mistura de imagens de execuções passadas.
+    """
+    debug_path_str = os.getenv("DEBUG_DIR", "debug_imagens")
+    debug_path = Path(debug_path_str).resolve()
+    
+    if debug_path.exists() and debug_path.is_dir():
+        print(f"🧹 Limpando pasta de debug antiga: {debug_path}")
+        try:
+            shutil.rmtree(debug_path) # Deleta a pasta e tudo dentro dela
+        except Exception as e:
+            print(f"⚠️  Não foi possível limpar a pasta de debug: {e}")
+    else:
+        print(f"✨ Pasta de debug limpa (ou inexistente): {debug_path}")
+# 1. Força o caminho exato onde o main.py está
+caminho_env = Path(__file__).resolve().parent / ".env"
+
+print(f"🔍 [DEBUG] Procurando .env em: {caminho_env}")
+print(f"   Arquivo existe? {caminho_env.exists()}")
+
+# 2. Carrega forçando esse caminho
+load_dotenv(dotenv_path=caminho_env, override=True)
+
+# 3. Testa se pegou a variável do Zoom (deveria ser 19)
+print(f"   ZOOM Carregado: {os.getenv('TILE_ZOOM')} (Esperado: 19)")
+print("-" * 30)
+
+# ... resto dos imports (modules.entrada, etc) ...
 def main() -> None:
     entrada_batch = [
         {"id": "SUB_BTF_CENTRO", "lat": -22.994598, "lon": -43.377366},
-        {"id": "SUB_XYZ_VIZINHA", "lat": -22.999391, "lon": -43.431344},
-        {"id": "SUB_RURAL_ISOLADA", "lat": -23.011251, "lon": -43.468282},
+       
     ]
 
     print("🚀 INICIANDO SOLARSCAN (MODO BATCH)...")

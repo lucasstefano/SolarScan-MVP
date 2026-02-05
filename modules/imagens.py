@@ -2,22 +2,18 @@ import os
 import time
 import random
 import requests
+from config import GOOGLE_MAPS_API_KEY  # <--- Importa a chave carregada do .env
 
 try:
     import certifi
-except Exception:
+except ImportError:
     certifi = None
 
 """
 Módulo para aquisição de imagens de satélite.
-
-⚠️ Importante:
-- NÃO hardcode API keys no código.
-- Use GOOGLE_MAPS_API_KEY via variável de ambiente.
 """
 
 GOOGLE_STATIC_MAPS_URL = "https://maps.googleapis.com/maps/api/staticmap"
-
 
 def baixar_imagem_tile(
     lat: float,
@@ -31,19 +27,10 @@ def baixar_imagem_tile(
 ) -> bytes:
     """
     Baixa imagem de satélite do Google Maps Static API.
-
-    Args:
-        lat/lon: centro do tile
-        zoom: zoom (deve ser consistente com geo_calculos.anexar_latlon_da_bbox)
-        size: ex "640x640"
-        scale: 1 ou 2
-        img_format: "png" ou "jpg"
-        timeout_s: timeout do request
-        retries: tentativas com backoff para 429/5xx
     """
-    api_key = "AIzaSyAHbiO3fZ-GUeg6g-Q53qyJnZ9Q0F_54Sc"
-    if not api_key:
-        raise RuntimeError("Defina a variável de ambiente GOOGLE_MAPS_API_KEY")
+    # Verifica se a chave foi carregada corretamente
+    if not GOOGLE_MAPS_API_KEY:
+        raise RuntimeError("Defina a variável GOOGLE_MAPS_API_KEY no arquivo .env")
 
     params = {
         "center": f"{lat},{lon}",
@@ -52,11 +39,11 @@ def baixar_imagem_tile(
         "scale": str(int(scale)),
         "maptype": "satellite",
         "format": img_format,
-        "key": api_key,
+        "key": GOOGLE_MAPS_API_KEY,  # <--- Usa a variável importada
     }
 
     headers = {"User-Agent": "SolarScan/1.0 (+tile-downloader)"}
-
+    
     # Em alguns ambientes Windows, isso resolve travas/erros de SSL no requests
     verify = certifi.where() if certifi is not None else True
 
@@ -80,6 +67,7 @@ def baixar_imagem_tile(
                 raise last_err
 
             if r.status_code != 200:
+                # Se a chave estiver errada, o erro vai aparecer aqui (403 Forbidden)
                 raise RuntimeError(f"HTTP {r.status_code}: {r.text[:300]}")
 
             content_type = (r.headers.get("Content-Type") or "").lower()

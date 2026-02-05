@@ -1,26 +1,11 @@
-# modules/spatial_join.py
 from __future__ import annotations
+import logging
+from shapely.geometry import Point, shape
+from shapely.strtree import STRtree  # <--- A chave da performance
 
-import math
-from shapely.geometry import Point
-
-try:
-    from shapely.prepared import prep
-except Exception:
-    prep = None
-
+logger = logging.getLogger("solarscan.spatial")
 
 _PRIORITY = {"industrial": 3, "commercial": 2, "residential": 1, "unknown": 0}
-
-
-def _deg_to_meters_lat(d: float) -> float:
-    return float(d) * 111_320.0
-
-
-def _distance_deg_to_m(d_deg: float, lat: float) -> float:
-    # aproximação em metros (bom o bastante pra 30–60m)
-    return _deg_to_meters_lat(d_deg)
-
 
 def spatial_join(
     detections: list[dict],
@@ -28,68 +13,99 @@ def spatial_join(
     max_near_m: float = 60.0,
 ) -> list[dict]:
     """
-    Faz join ponto->polígono.
-
-    - Primário: contém/intersecta => confidence=HIGH
-    - Fallback: polígono mais próximo até max_near_m => confidence=LOW
+    Faz join ponto->polígono usando R-Tree (STRtree) para performance O(log N).
     """
-    if prep is not None:
-        prepared = [(prep(p["geometry"]), p["geometry"], str(p.get("landuse", "unknown"))) for p in (polygons or [])]
-        use_prepared = True
-    else:
-        prepared = [(p["geometry"], p["geometry"], str(p.get("landuse", "unknown"))) for p in (polygons or [])]
-        use_prepared = False
+    if not detections:
+        return []
+    
+    if not polygons:
+        # Se não tem mapa, tudo é unknown
+        return [{**d, "landuse": "unknown", "landuse_confidence": "NONE"} for d in detections]
+
+    # 1. Preparar Geometrias e Índice Espacial
+    # Mantemos uma lista paralela para recuperar os metadados (landuse) pelo índice
+    poly_geoms = []
+    poly_metadata = []
+    
+    for p in polygons:
+        geom = p.get("geometry")
+        if geom and geom.is_valid:
+            poly_geoms.append(geom)
+            poly_metadata.append(str(p.get("landuse", "unknown")))
+
+    if not poly_geoms:
+        return [{**d, "landuse": "unknown"} for d in detections]
+
+    # Constrói a árvore uma única vez (Muito rápido)
+    tree = STRtree(poly_geoms)
 
     result = []
 
-    for det in detections or []:
+    for det in detections:
         pt = Point(det["lon"], det["lat"])
-
+        
+        # 2. Query Otimizada: A árvore retorna apenas candidatos que intersectam ou estão muito perto
+        # query(geometry) retorna índices dos polígonos que tocam o bounding box do ponto
+        candidate_indices = tree.query(pt)
+        
         best = "unknown"
-        best_score = 0
-        conf = "HIGH"
+        best_score = -1
+        found_hit = False
 
-        hit_any = False
-        for geom_pre, geom_raw, lu in prepared:
-            hit = (geom_pre.contains(pt) or geom_pre.intersects(pt)) if use_prepared else geom_raw.covers(pt)
-            if not hit:
-                continue
-            hit_any = True
+        # Verifica interseção real apenas nos candidatos (poucos)
+        for idx in candidate_indices:
+            geom = poly_geoms[idx]
+            if geom.contains(pt) or geom.intersects(pt):
+                lu = poly_metadata[idx]
+                score = _PRIORITY.get(lu, 0)
+                if score > best_score:
+                    best = lu
+                    best_score = score
+                    found_hit = True
+        
+        if found_hit:
+            result.append({**det, "landuse": best, "landuse_confidence": "HIGH"})
+            continue
 
-            score = _PRIORITY.get(lu, 0)
-            if score > best_score:
-                best, best_score = lu, score
-                if best_score == 3:
-                    break
+        # 3. Fallback: Proximidade (Nearest Neighbor)
+        # O STRtree também tem 'nearest', mas para manter a lógica original de 'max_near_m':
+        # Buscamos vizinhos num buffer ao redor do ponto para não varrer o mapa todo
+        query_buffer = pt.buffer(max_near_m / 111320.0) # Aprox metros para graus
+        near_indices = tree.query(query_buffer)
+        
+        nearest_lu = "unknown"
+        nearest_score = -1
+        nearest_dist_m = float("inf")
 
-        if not hit_any and prepared:
-            nearest_lu = "unknown"
-            nearest_score = 0
-            nearest_m = None
+        for idx in near_indices:
+            geom = poly_geoms[idx]
+            # Distância aproximada em graus convertida para metros
+            # Nota: shapely distance é cartesiana plana, para lat/lon precisa de projeção ou aprox
+            # Usando a aprox simples do seu código original:
+            d_deg = geom.distance(pt)
+            d_m = d_deg * 111320.0 
 
-            for _, geom_raw, lu in prepared:
-                try:
-                    d_deg = geom_raw.distance(pt)
-                    d_m = _distance_deg_to_m(d_deg, det["lat"])
-                except Exception:
-                    continue
+            if d_m <= max_near_m:
+                lu = poly_metadata[idx]
+                score = _PRIORITY.get(lu, 0)
+                
+                # Lógica de prioridade: Menor distância desempata maior prioridade
+                if (score > nearest_score) or (score == nearest_score and d_m < nearest_dist_m):
+                    nearest_score = score
+                    nearest_lu = lu
+                    nearest_dist_m = d_m
 
-                if d_m <= float(max_near_m):
-                    score = _PRIORITY.get(lu, 0)
-                    if (score > nearest_score) or (score == nearest_score and (nearest_m is None or d_m < nearest_m)):
-                        nearest_score = score
-                        nearest_lu = lu
-                        nearest_m = d_m
-
-            if nearest_m is not None and nearest_score > 0:
-                det2 = {**det, "landuse": nearest_lu, "landuse_confidence": "LOW", "landuse_near_m": round(float(nearest_m), 1)}
-                result.append(det2)
-                continue
-
-        result.append({**det, "landuse": best, "landuse_confidence": conf})
+        if nearest_dist_m < float("inf") and nearest_score > 0:
+            result.append({
+                **det, 
+                "landuse": nearest_lu, 
+                "landuse_confidence": "LOW", 
+                "landuse_near_m": round(nearest_dist_m, 1)
+            })
+        else:
+            result.append({**det, "landuse": "unknown", "landuse_confidence": "NONE"})
 
     return result
-
 
 def aggregate_landuse(joined: list[dict]) -> dict:
     summary = {}
