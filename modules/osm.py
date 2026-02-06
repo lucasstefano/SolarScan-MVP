@@ -49,7 +49,7 @@ if not logger.handlers:
     logger.propagate = False
 
 
-_overpass_env = "https://overpass.kumi.systems/api/interpreter"
+_overpass_env = "https://overpass-api.de/api/interpreter"
 
 OVERPASS_ENDPOINTS: List[str] = [
     _overpass_env,
@@ -59,7 +59,27 @@ OVERPASS_ENDPOINTS: List[str] = [
 ]
 OVERPASS_ENDPOINTS = [u for u in OVERPASS_ENDPOINTS if u]
 
-
+# 2. NOVA FUNÇÃO: Busca específica para a Máscara (Smart Scan)
+def obter_mascara_edificacoes(lat: float, lon: float, raio_m: float) -> List[Dict[str, Any]]:
+    """
+    Busca APENAS polígonos físicos (prédios, galpões, estruturas) para usar como máscara de corte.
+    Ignora landuse genérico (zonas residenciais) para economizar tiles.
+    """
+    logger.info("OSM [MASCARA] | Buscando edificações para Smart Scan (raio=%.0fm)...", raio_m)
+    
+    # Reutiliza a query de fallback que foca em 'building', 'man_made', etc.
+    query = _build_overpass_query_fallback(lat, lon, raio_m)
+    
+    try:
+        data = _post_overpass(query)
+        # Usa o parser de fallback que lida bem com buildings
+        poligonos = parse_polygons_fallback(data, poi_buffer_m=20.0)
+        logger.info("OSM [MASCARA] | %d estruturas encontradas para filtrar o grid.", len(poligonos))
+        return poligonos
+    except Exception as e:
+        logger.warning("OSM [MASCARA] | Falha ao buscar máscara: %s. O grid será total (sem filtro).", str(e))
+        return []
+    
 def _build_overpass_query_landuse(lat: float, lon: float, raio_m: float) -> str:
     r = int(max(1.0, float(raio_m)))
     return f"""
